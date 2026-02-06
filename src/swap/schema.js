@@ -73,6 +73,12 @@ export function validateSwapBody(kind, body) {
       }
       if (!isPosInt(body.btc_sats)) return { ok: false, error: 'rfq.btc_sats must be a positive integer' };
       if (!isAmountString(body.usdt_amount)) return { ok: false, error: 'rfq.usdt_amount must be a decimal string' };
+      if (body.sol_mint !== undefined && body.sol_mint !== null) {
+        if (!isBase58(body.sol_mint)) return { ok: false, error: 'rfq.sol_mint must be base58' };
+      }
+      if (body.sol_recipient !== undefined && body.sol_recipient !== null) {
+        if (!isBase58(body.sol_recipient)) return { ok: false, error: 'rfq.sol_recipient must be base58' };
+      }
       if (body.valid_until_unix !== undefined && !isPosInt(body.valid_until_unix)) {
         return { ok: false, error: 'rfq.valid_until_unix must be a unix seconds integer' };
       }
@@ -87,6 +93,12 @@ export function validateSwapBody(kind, body) {
       }
       if (!isAmountString(body.usdt_amount)) return { ok: false, error: 'quote.usdt_amount must be a decimal string' };
       if (!isPosInt(body.btc_sats)) return { ok: false, error: 'quote.btc_sats must be a positive integer' };
+      if (body.sol_mint !== undefined && body.sol_mint !== null) {
+        if (!isBase58(body.sol_mint)) return { ok: false, error: 'quote.sol_mint must be base58' };
+      }
+      if (body.sol_recipient !== undefined && body.sol_recipient !== null) {
+        if (!isBase58(body.sol_recipient)) return { ok: false, error: 'quote.sol_recipient must be base58' };
+      }
       if (!isPosInt(body.valid_until_unix)) {
         return { ok: false, error: 'quote.valid_until_unix must be a unix seconds integer' };
       }

@@ -21,8 +21,10 @@ import {
   claimEscrowTx,
   createEscrowTx,
   deriveEscrowPda,
+  initConfigTx,
   getEscrowState,
   refundEscrowTx,
+  withdrawFeesTx,
 } from '../src/solana/lnUsdtEscrowClient.js';
 
 const execFileP = promisify(execFile);
@@ -243,10 +245,13 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
   const connection = sol.connection;
   const solAlice = Keypair.generate();
   const solBob = Keypair.generate();
+  const solFeeAuthority = Keypair.generate();
   const airdropAlice = await connection.requestAirdrop(solAlice.publicKey, 2_000_000_000);
   await connection.confirmTransaction(airdropAlice, 'confirmed');
   const airdropBob = await connection.requestAirdrop(solBob.publicKey, 2_000_000_000);
   await connection.confirmTransaction(airdropBob, 'confirmed');
+  const airdropFeeAuth = await connection.requestAirdrop(solFeeAuthority.publicKey, 2_000_000_000);
+  await connection.confirmTransaction(airdropFeeAuth, 'confirmed');
 
   await retry(async () => {
     const bal = await connection.getBalance(solAlice.publicKey, 'confirmed');
@@ -262,8 +267,23 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
   const mint = await createMint(connection, solAlice, solAlice.publicKey, null, 6);
   const aliceToken = await createAssociatedTokenAccount(connection, solAlice, mint, solAlice.publicKey);
   const bobToken = await createAssociatedTokenAccount(connection, solAlice, mint, solBob.publicKey);
+  const feeCollectorToken = await createAssociatedTokenAccount(
+    connection,
+    solAlice,
+    mint,
+    solFeeAuthority.publicKey
+  );
   // Mint enough for multiple escrows across subtests.
   await mintTo(connection, solAlice, mint, aliceToken, solAlice, 200_000_000n); // 200 USDT (6 decimals)
+
+  // Initialize program-wide config (1% fee).
+  const { tx: initCfgTx } = await initConfigTx({
+    connection,
+    payer: solFeeAuthority,
+    feeCollector: solFeeAuthority.publicKey,
+    feeBps: 100,
+  });
+  await sendAndConfirm(connection, initCfgTx);
 
   // Create escrow keyed to LN payment_hash.
   const now = Math.floor(Date.now() / 1000);
@@ -287,7 +307,10 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
   assert.equal(state.paymentHashHex, paymentHashHex);
   assert.equal(state.recipient.toBase58(), solBob.publicKey.toBase58());
   assert.equal(state.refund.toBase58(), solAlice.publicKey.toBase58());
-  assert.equal(state.amount, 100_000_000n);
+  assert.equal(state.netAmount, 100_000_000n);
+  assert.equal(state.feeBps, 100);
+  assert.equal(state.feeAmount, 1_000_000n);
+  assert.equal(state.feeCollector.toBase58(), solFeeAuthority.publicKey.toBase58());
 
   // Bob pays LN invoice and obtains preimage.
   const payRes = await clnCli('cln-bob', ['pay', bolt11]);
@@ -306,11 +329,26 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
 
   const bobAcc = await getAccount(connection, bobToken, 'confirmed');
   assert.equal(bobAcc.amount, 100_000_000n);
+  const feeAcc = await getAccount(connection, feeCollectorToken, 'confirmed');
+  assert.equal(feeAcc.amount, 0n);
+
+  // Fee collector can withdraw accrued fees at any time.
+  const { tx: withdrawTx } = await withdrawFeesTx({
+    connection,
+    feeCollector: solFeeAuthority,
+    feeCollectorTokenAccount: feeCollectorToken,
+    mint,
+    amount: 0n,
+  });
+  await sendAndConfirm(connection, withdrawTx);
+  const feeAcc2 = await getAccount(connection, feeCollectorToken, 'confirmed');
+  assert.equal(feeAcc2.amount, 1_000_000n);
 
   const afterState = await getEscrowState(connection, paymentHashHex);
   assert.ok(afterState, 'escrow state still exists');
   assert.equal(afterState.status, 1, 'escrow claimed');
-  assert.equal(afterState.amount, 0n, 'escrow drained');
+  assert.equal(afterState.netAmount, 0n, 'escrow drained');
+  assert.equal(afterState.feeAmount, 0n, 'escrow drained');
 
   await t.test('refund path: escrow refunds after timeout', async () => {
     const invoice2 = await clnCli('cln-alice', ['invoice', '100000msat', 'swap2', 'swap refund']);
@@ -347,7 +385,8 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
     const st2 = await getEscrowState(connection, paymentHash2);
     assert.ok(st2, 'escrow state exists');
     assert.equal(st2.status, 2, 'escrow refunded');
-    assert.equal(st2.amount, 0n, 'escrow drained');
+    assert.equal(st2.netAmount, 0n, 'escrow drained');
+    assert.equal(st2.feeAmount, 0n, 'escrow drained');
   });
 
   await t.test('negative: wrong preimage cannot claim', async () => {

@@ -4,6 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import b4a from 'b4a';
@@ -40,7 +41,9 @@ import {
   LN_USDT_ESCROW_PROGRAM_ID,
   claimEscrowTx,
   createEscrowTx,
+  initConfigTx,
   getEscrowState,
+  withdrawFeesTx,
 } from '../src/solana/lnUsdtEscrowClient.js';
 
 const execFileP = promisify(execFile);
@@ -202,6 +205,11 @@ async function fsMkdirp(dir) {
   await sh('mkdir', ['-p', dir]);
 }
 
+function writeSolanaKeypairJson(filePath, keypair) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(Array.from(keypair.secretKey)));
+}
+
 function spawnPeer(args, { label }) {
   const proc = spawn('pear', ['run', '.', ...args], {
     cwd: repoRoot,
@@ -223,6 +231,47 @@ function spawnPeer(args, { label }) {
     }
   });
   return { proc, tail: () => out };
+}
+
+function spawnBot(args, { label }) {
+  const proc = spawn('node', args, {
+    cwd: repoRoot,
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  let err = '';
+  const appendOut = (chunk) => {
+    out += chunk;
+    if (out.length > 20000) out = out.slice(-20000);
+  };
+  const appendErr = (chunk) => {
+    err += chunk;
+    if (err.length > 20000) err = err.slice(-20000);
+  };
+  proc.stdout.on('data', (d) => appendOut(String(d)));
+  proc.stderr.on('data', (d) => appendErr(String(d)));
+  const wait = () =>
+    new Promise((resolve, reject) => {
+      proc.once('exit', (code) => {
+        if (code === 0) resolve({ out, err });
+        else reject(new Error(`[${label}] exit code=${code}. stderr tail:\n${err}\nstdout tail:\n${out}`));
+      });
+      proc.once('error', (e) => reject(e));
+    });
+  return { proc, wait, tail: () => ({ out, err }) };
+}
+
+function parseJsonLines(text) {
+  const events = [];
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      events.push(JSON.parse(trimmed));
+    } catch (_e) {}
+  }
+  return events;
 }
 
 async function killProc(proc) {
@@ -297,8 +346,9 @@ async function sendUntilReceived({
 
 test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) => {
   const runId = crypto.randomBytes(4).toString('hex');
+  const tradeId = `swap_e2e_${runId}`;
   const otcChannel = `btc-usdt-sol-otc-${runId}`;
-  const swapChannel = `swap:${runId}`;
+  const swapChannel = `swap:${tradeId}`;
 
   // Avoid relying on external DHT bootstrap nodes for e2e reliability.
   // Peers are configured to use this local bootstrapper via --dht-bootstrap.
@@ -383,6 +433,11 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
   // Solana identities for settlement layer.
   const solService = Keypair.generate();
   const solClient = Keypair.generate();
+  const solKeysDir = path.join(repoRoot, 'onchain/solana/keys-e2e', runId);
+  const solServiceKeyPath = path.join(solKeysDir, 'service.json');
+  const solClientKeyPath = path.join(solKeysDir, 'client.json');
+  writeSolanaKeypairJson(solServiceKeyPath, solService);
+  writeSolanaKeypairJson(solClientKeyPath, solClient);
   const airdrop1 = await connection.requestAirdrop(solService.publicKey, 2_000_000_000);
   await connection.confirmTransaction(airdrop1, 'confirmed');
   const airdrop2 = await connection.requestAirdrop(solClient.publicKey, 2_000_000_000);
@@ -392,6 +447,24 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
   const serviceToken = await createAssociatedTokenAccount(connection, solService, mint, solService.publicKey);
   const clientToken = await createAssociatedTokenAccount(connection, solService, mint, solClient.publicKey);
   await mintTo(connection, solService, mint, serviceToken, solService, 200_000_000n);
+
+  // Program-wide fee config (1%).
+  const solFeeAuthority = Keypair.generate();
+  const airdropFeeAuth = await connection.requestAirdrop(solFeeAuthority.publicKey, 2_000_000_000);
+  await connection.confirmTransaction(airdropFeeAuth, 'confirmed');
+  const feeCollectorToken = await createAssociatedTokenAccount(
+    connection,
+    solService,
+    mint,
+    solFeeAuthority.publicKey
+  );
+  const { tx: initCfgTx } = await initConfigTx({
+    connection,
+    payer: solFeeAuthority,
+    feeCollector: solFeeAuthority.publicKey,
+    feeBps: 100,
+  });
+  await sendAndConfirm(connection, initCfgTx);
 
   // Intercom peer identities.
   const storesDir = path.join(repoRoot, 'stores');
@@ -567,440 +640,154 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
     if (evt.channel === swapChannel) seen.eve.swap.push(evt.message);
   });
 
-  const tradeId = `swap_e2e_${runId}`;
   let aliceTrade = createInitialTrade(tradeId);
   let bobTrade = createInitialTrade(tradeId);
 
-  // OTC handshake: RFQ -> QUOTE -> QUOTE_ACCEPT -> SWAP_INVITE (delivers sidechannel invite).
-  const nowSec = Math.floor(Date.now() / 1000);
   const usdtAmount = 100_000_000n;
   const sats = 50_000;
 
-  const rfqUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.RFQ,
-    tradeId,
-    body: {
-      pair: PAIR.BTC_LN__USDT_SOL,
-      direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
-      btc_sats: sats,
-      usdt_amount: usdtAmount.toString(),
-      valid_until_unix: nowSec + 60,
-    },
-  });
-  const rfqSigned = await signEnvelopeViaBridge(bobSc, rfqUnsigned);
-  assert.equal(validateSwapEnvelope(rfqSigned).ok, true);
-  await sendUntilReceived({
-    sender: bobSc,
-    receiverSeen: seen.alice.otc,
-    channel: otcChannel,
-    message: rfqSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.RFQ && m?.trade_id === tradeId,
-    label: 'alice got rfq',
-  });
-  const rfqId = hashUnsignedEnvelope(rfqUnsigned);
-
-  const quoteUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.QUOTE,
-    tradeId,
-    body: {
-      rfq_id: rfqId,
-      pair: PAIR.BTC_LN__USDT_SOL,
-      direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
-      btc_sats: sats,
-      usdt_amount: usdtAmount.toString(),
-      valid_until_unix: nowSec + 30,
-    },
-  });
-  const quoteSigned = await signEnvelopeViaBridge(aliceSc, quoteUnsigned);
-  assert.equal(validateSwapEnvelope(quoteSigned).ok, true);
-  await sendUntilReceived({
-    sender: aliceSc,
-    receiverSeen: seen.bob.otc,
-    channel: otcChannel,
-    message: quoteSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.QUOTE && m?.trade_id === tradeId,
-    label: 'bob got quote',
-  });
-  const quoteId = hashUnsignedEnvelope(quoteUnsigned);
-
-  const quoteAcceptUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.QUOTE_ACCEPT,
-    tradeId,
-    body: {
-      rfq_id: rfqId,
-      quote_id: quoteId,
-    },
-  });
-  const quoteAcceptSigned = await signEnvelopeViaBridge(bobSc, quoteAcceptUnsigned);
-  assert.equal(validateSwapEnvelope(quoteAcceptSigned).ok, true);
-  await sendUntilReceived({
-    sender: bobSc,
-    receiverSeen: seen.alice.otc,
-    channel: otcChannel,
-    message: quoteAcceptSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.QUOTE_ACCEPT && m?.trade_id === tradeId,
-    label: 'alice got quote_accept',
-  });
-
-  // Prepare swap-channel welcome + invite (owned by the service peer Alice) and deliver it over OTC.
-  const swapWelcome = createSignedWelcome(
-    { channel: swapChannel, ownerPubKey: aliceKeys.pubHex, text: `swap ${runId}` },
-    signAliceHex
-  );
-
-  const inviteForBob = createSignedInvite(
-    {
-      channel: swapChannel,
-      inviteePubKey: bobKeys.pubHex,
-      inviterPubKey: aliceKeys.pubHex,
-      ttlMs: 10 * 60 * 1000,
-    },
-    signAliceHex,
-    { welcome: swapWelcome }
-  );
-
-  const swapInviteUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.SWAP_INVITE,
-    tradeId,
-    body: {
-      rfq_id: rfqId,
-      quote_id: quoteId,
-      swap_channel: swapChannel,
-      owner_pubkey: aliceKeys.pubHex,
-      invite: inviteForBob,
-      welcome: swapWelcome,
-    },
-  });
-  const swapInviteSigned = await signEnvelopeViaBridge(aliceSc, swapInviteUnsigned);
-  assert.equal(validateSwapEnvelope(swapInviteSigned).ok, true);
-  await sendUntilReceived({
-    sender: aliceSc,
-    receiverSeen: seen.bob.otc,
-    channel: otcChannel,
-    message: swapInviteSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.SWAP_INVITE && m?.trade_id === tradeId,
-    label: 'bob got swap_invite',
-  });
-
-  // Join swap channel (service joins first; client uses invite).
-  const joinA = await aliceSc.join(swapChannel, { welcome: swapWelcome });
-  assert.equal(joinA.type, 'joined');
-
-  const joinB = await bobSc.join(swapChannel, {
-    invite: swapInviteSigned.body.invite,
-    welcome: swapInviteSigned.body.welcome,
-  });
-  assert.equal(joinB.type, 'joined');
-
+  // Eve joins the swap topic early (uninvited). Sender-side invite gating must prevent leakage.
   const joinE = await eveSc.join(swapChannel);
   assert.equal(joinE.type, 'joined');
 
-  // Bob sends a signed "ready" status with invite attached (ensures Alice authorizes Bob quickly).
-  const readyUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.STATUS,
-    tradeId,
-    body: { state: STATE.INIT, note: 'ready' },
-  });
-  const readySigned = await signEnvelopeViaBridge(bobSc, readyUnsigned);
-  assert.equal(validateSwapEnvelope(readySigned).ok, true);
-  await sendUntilReceived({
-    sender: bobSc,
-    receiverSeen: seen.alice.swap,
-    channel: swapChannel,
-    message: readySigned,
-    sendOptions: { invite: swapInviteSigned.body.invite },
-    match: (m) => m?.kind === KIND.STATUS,
-    label: 'alice got ready',
-    tries: 60,
-    delayMs: 500,
-    perTryTimeoutMs: 2000,
-  });
-
-  // Terms (service is LN receiver + Solana depositor).
-
-  const termsUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.TERMS,
-    tradeId,
-    body: {
-      pair: PAIR.BTC_LN__USDT_SOL,
-      direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
-      btc_sats: sats,
-      usdt_amount: usdtAmount.toString(),
-      usdt_decimals: 6,
-      sol_mint: mint.toBase58(),
-      sol_recipient: solClient.publicKey.toBase58(),
-      sol_refund: solService.publicKey.toBase58(),
-      sol_refund_after_unix: nowSec + 3600,
-      ln_receiver_peer: aliceKeys.pubHex,
-      ln_payer_peer: bobKeys.pubHex,
-      terms_valid_until_unix: nowSec + 300,
-    },
-  });
-  const termsSigned = await signEnvelopeViaBridge(aliceSc, termsUnsigned);
-  assert.equal(validateSwapEnvelope(termsSigned).ok, true);
-  await sendUntilReceived({
-    sender: aliceSc,
-    receiverSeen: seen.bob.swap,
-    channel: swapChannel,
-    message: termsSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.TERMS,
-    label: 'bob got terms',
-    tries: 30,
-    delayMs: 500,
-    perTryTimeoutMs: 2000,
-  });
-  {
-    const r = applySwapEnvelope(aliceTrade, termsSigned);
-    assert.equal(r.ok, true, r.error);
-    aliceTrade = r.trade;
-  }
-
-  {
-    const r = applySwapEnvelope(bobTrade, termsSigned);
-    assert.equal(r.ok, true, r.error);
-    bobTrade = r.trade;
-    assert.equal(bobTrade.state, STATE.TERMS);
-  }
-
-  // Accept.
-  const acceptUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.ACCEPT,
-    tradeId,
-    body: { terms_hash: hashUnsignedEnvelope(termsUnsigned) },
-  });
-  const acceptSigned = await signEnvelopeViaBridge(bobSc, acceptUnsigned);
-  await sendUntilReceived({
-    sender: bobSc,
-    receiverSeen: seen.alice.swap,
-    channel: swapChannel,
-    message: acceptSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.ACCEPT,
-    label: 'alice got accept',
-    tries: 30,
-    delayMs: 500,
-    perTryTimeoutMs: 2000,
-  });
-  {
-    const r = applySwapEnvelope(bobTrade, acceptSigned);
-    assert.equal(r.ok, true, r.error);
-    bobTrade = r.trade;
-    assert.equal(bobTrade.state, STATE.ACCEPTED);
-  }
-
-  {
-    const r = applySwapEnvelope(aliceTrade, acceptSigned);
-    assert.equal(r.ok, true, r.error);
-    aliceTrade = r.trade;
-    assert.equal(aliceTrade.state, STATE.ACCEPTED);
-  }
-
-  // Service creates LN invoice (normal invoice; no hodl invoices).
-  const invoice = await clnCli('cln-alice', ['invoice', `${sats}sat`, tradeId, 'swap']);
-  const bolt11 = invoice.bolt11;
-  const paymentHashHex = parseHex32(invoice.payment_hash, 'payment_hash');
-
-  const lnInvUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.LN_INVOICE,
-    tradeId,
-    body: {
-      bolt11,
-      payment_hash_hex: paymentHashHex,
-      amount_msat: String(sats * 1000),
-    },
-  });
-  const lnInvSigned = await signEnvelopeViaBridge(aliceSc, lnInvUnsigned);
-  await sendUntilReceived({
-    sender: aliceSc,
-    receiverSeen: seen.bob.swap,
-    channel: swapChannel,
-    message: lnInvSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.LN_INVOICE,
-    label: 'bob got invoice',
-    tries: 30,
-    delayMs: 500,
-    perTryTimeoutMs: 2000,
-  });
-  {
-    const r = applySwapEnvelope(aliceTrade, lnInvSigned);
-    assert.equal(r.ok, true, r.error);
-    aliceTrade = r.trade;
-    assert.equal(aliceTrade.state, STATE.INVOICE);
-  }
-  {
-    const r = applySwapEnvelope(bobTrade, lnInvSigned);
-    assert.equal(r.ok, true, r.error);
-    bobTrade = r.trade;
-    assert.equal(bobTrade.state, STATE.INVOICE);
-  }
-
-  // Service locks USDT in Solana escrow keyed to LN payment_hash.
-  const refundAfter = Math.floor(Date.now() / 1000) + 3600;
-  const { tx: escrowTx, escrowPda, vault } = await createEscrowTx({
-    connection,
-    payer: solService,
-    payerTokenAccount: serviceToken,
-    mint,
-    paymentHashHex,
-    recipient: solClient.publicKey,
-    refund: solService.publicKey,
-    refundAfterUnix: refundAfter,
-    amount: usdtAmount,
-  });
-  const escrowSig = await sendAndConfirm(connection, escrowTx);
-
-  const solEscrowUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.SOL_ESCROW_CREATED,
-    tradeId,
-    body: {
-      payment_hash_hex: paymentHashHex,
-      program_id: LN_USDT_ESCROW_PROGRAM_ID.toBase58(),
-      escrow_pda: escrowPda.toBase58(),
-      vault_ata: vault.toBase58(),
-      mint: mint.toBase58(),
-      amount: usdtAmount.toString(),
-      refund_after_unix: refundAfter,
-      recipient: solClient.publicKey.toBase58(),
-      refund: solService.publicKey.toBase58(),
-      tx_sig: escrowSig,
-    },
-  });
-  const solEscrowSigned = await signEnvelopeViaBridge(aliceSc, solEscrowUnsigned);
-  await sendUntilReceived({
-    sender: aliceSc,
-    receiverSeen: seen.bob.swap,
-    channel: swapChannel,
-    message: solEscrowSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.SOL_ESCROW_CREATED,
-    label: 'bob got escrow proof',
-    tries: 30,
-    delayMs: 500,
-    perTryTimeoutMs: 2000,
-  });
-  {
-    const r = applySwapEnvelope(aliceTrade, solEscrowSigned);
-    assert.equal(r.ok, true, r.error);
-    aliceTrade = r.trade;
-    assert.equal(aliceTrade.state, STATE.ESCROW);
-  }
-  {
-    const r = applySwapEnvelope(bobTrade, solEscrowSigned);
-    assert.equal(r.ok, true, r.error);
-    bobTrade = r.trade;
-    assert.equal(bobTrade.state, STATE.ESCROW);
-  }
-
-  // Client verifies escrow state on-chain (hard rule: no escrow verified, no LN payment sent).
-  const prepay = await verifySwapPrePayOnchain({
-    terms: bobTrade.terms,
-    invoiceBody: bobTrade.invoice,
-    escrowBody: bobTrade.escrow,
-    connection,
-    now_unix: Math.floor(Date.now() / 1000),
-  });
-  assert.equal(prepay.ok, true, prepay.error);
-
-  // Client pays LN invoice and claims escrow with preimage.
-  const payRes = await clnCli('cln-bob', ['pay', bolt11]);
-  const preimageHex = parseHex32(payRes.payment_preimage, 'payment_preimage');
-
-  const lnPaidUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.LN_PAID,
-    tradeId,
-    body: { payment_hash_hex: paymentHashHex },
-  });
-  const lnPaidSigned = await signEnvelopeViaBridge(bobSc, lnPaidUnsigned);
-  await sendUntilReceived({
-    sender: bobSc,
-    receiverSeen: seen.alice.swap,
-    channel: swapChannel,
-    message: lnPaidSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.LN_PAID,
-    label: 'alice got ln_paid',
-    tries: 30,
-    delayMs: 500,
-    perTryTimeoutMs: 2000,
-  });
-  {
-    const r = applySwapEnvelope(bobTrade, lnPaidSigned);
-    assert.equal(r.ok, true, r.error);
-    bobTrade = r.trade;
-    assert.equal(bobTrade.state, STATE.LN_PAID);
-  }
-
   const beforeBal = (await getAccount(connection, clientToken, 'confirmed')).amount;
-  const { tx: claimTx } = await claimEscrowTx({
-    connection,
-    recipient: solClient,
-    recipientTokenAccount: clientToken,
-    mint,
-    paymentHashHex,
-    preimageHex,
-  });
-  const claimSig = await sendAndConfirm(connection, claimTx);
+
+  const makerBot = spawnBot(
+    [
+      'scripts/otc-maker.mjs',
+      '--url',
+      `ws://127.0.0.1:${alicePort}`,
+      '--token',
+      aliceTokenWs,
+      '--otc-channel',
+      otcChannel,
+      '--once',
+      '1',
+      '--run-swap',
+      '1',
+      '--swap-timeout-sec',
+      '240',
+      '--ln-backend',
+      'docker',
+      '--ln-compose-file',
+      composeFile,
+      '--ln-service',
+      'cln-alice',
+      '--ln-network',
+      'regtest',
+      '--solana-rpc-url',
+      'http://127.0.0.1:8899',
+      '--solana-keypair',
+      solServiceKeyPath,
+      '--solana-mint',
+      mint.toBase58(),
+    ],
+    { label: 'maker-bot' }
+  );
+
+  const takerBot = spawnBot(
+    [
+      'scripts/otc-taker.mjs',
+      '--url',
+      `ws://127.0.0.1:${bobPort}`,
+      '--token',
+      bobTokenWs,
+      '--otc-channel',
+      otcChannel,
+      '--trade-id',
+      tradeId,
+      '--btc-sats',
+      String(sats),
+      '--usdt-amount',
+      usdtAmount.toString(),
+      '--timeout-sec',
+      '30',
+      '--once',
+      '1',
+      '--run-swap',
+      '1',
+      '--swap-timeout-sec',
+      '240',
+      '--ln-backend',
+      'docker',
+      '--ln-compose-file',
+      composeFile,
+      '--ln-service',
+      'cln-bob',
+      '--ln-network',
+      'regtest',
+      '--solana-rpc-url',
+      'http://127.0.0.1:8899',
+      '--solana-keypair',
+      solClientKeyPath,
+      '--solana-mint',
+      mint.toBase58(),
+    ],
+    { label: 'taker-bot' }
+  );
+
+  const [makerRes, takerRes] = await Promise.all([makerBot.wait(), takerBot.wait()]);
+  const makerEvents = parseJsonLines(makerRes.out);
+  const takerEvents = parseJsonLines(takerRes.out);
+  assert.ok(
+    makerEvents.some((e) => e?.type === 'swap_done'),
+    `maker bot did not emit swap_done. stdout tail:\n${makerRes.out}\nstderr tail:\n${makerRes.err}`
+  );
+  assert.ok(
+    takerEvents.some((e) => e?.type === 'swap_done'),
+    `taker bot did not emit swap_done. stdout tail:\n${takerRes.out}\nstderr tail:\n${takerRes.err}`
+  );
+
+  await waitFor(
+    () => {
+      const all = [...seen.alice.swap, ...seen.bob.swap];
+      return (
+        all.some((m) => m?.kind === KIND.LN_INVOICE) &&
+        all.some((m) => m?.kind === KIND.SOL_ESCROW_CREATED) &&
+        all.some((m) => m?.kind === KIND.SOL_CLAIMED)
+      );
+    },
+    { timeoutMs: 20_000, intervalMs: 100, label: 'swap messages observed' }
+  );
+
   const afterBal = (await getAccount(connection, clientToken, 'confirmed')).amount;
   assert.equal(afterBal - beforeBal, usdtAmount);
 
-  const claimedUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.SOL_CLAIMED,
-    tradeId,
-    body: { payment_hash_hex: paymentHashHex, escrow_pda: escrowPda.toBase58(), tx_sig: claimSig },
-  });
-  const claimedSigned = await signEnvelopeViaBridge(bobSc, claimedUnsigned);
-  await sendUntilReceived({
-    sender: bobSc,
-    receiverSeen: seen.alice.swap,
-    channel: swapChannel,
-    message: claimedSigned,
-    sendOptions: {},
-    match: (m) => m?.kind === KIND.SOL_CLAIMED,
-    label: 'alice got claimed',
-    tries: 30,
-    delayMs: 500,
-    perTryTimeoutMs: 2000,
-  });
-  {
-    const r = applySwapEnvelope(bobTrade, claimedSigned);
-    assert.equal(r.ok, true, r.error);
-    bobTrade = r.trade;
-    assert.equal(bobTrade.state, STATE.CLAIMED);
-  }
+  // Fee withdrawal check.
+  const feeBal = (await getAccount(connection, feeCollectorToken, 'confirmed')).amount;
+  assert.equal(feeBal, 0n);
 
-  // Verify escrow state on-chain.
+  const { tx: withdrawTx } = await withdrawFeesTx({
+    connection,
+    feeCollector: solFeeAuthority,
+    feeCollectorTokenAccount: feeCollectorToken,
+    mint,
+    amount: 0n,
+  });
+  await sendAndConfirm(connection, withdrawTx);
+  const feeBal2 = (await getAccount(connection, feeCollectorToken, 'confirmed')).amount;
+  assert.equal(feeBal2, 1_000_000n);
+
+  const invoiceMsg = [...seen.alice.swap, ...seen.bob.swap].find((m) => m?.kind === KIND.LN_INVOICE);
+  assert.ok(invoiceMsg, 'missing LN_INVOICE');
+  const paymentHashHex = parseHex32(invoiceMsg.body?.payment_hash_hex, 'payment_hash_hex');
+
   const st = await getEscrowState(connection, paymentHashHex);
   assert.ok(st);
   assert.equal(st.status, 1);
-  assert.equal(st.amount, 0n);
+  assert.equal(st.netAmount, 0n);
+  assert.equal(st.feeAmount, 0n);
 
-  // Apply all messages to state machines.
-  for (const msg of seen.alice.swap) {
-    if (!msg || typeof msg !== 'object') continue;
-    const res = applySwapEnvelope(aliceTrade, msg);
-    if (res.ok) aliceTrade = res.trade;
-  }
-  for (const msg of seen.bob.swap) {
-    if (!msg || typeof msg !== 'object') continue;
-    const res = applySwapEnvelope(bobTrade, msg);
-    if (res.ok) bobTrade = res.trade;
+  // Apply union of swap messages to state machines and ensure we reach terminal state.
+  const allSwap = [...seen.alice.swap, ...seen.bob.swap]
+    .filter((m) => m && typeof m === 'object' && m.trade_id === tradeId)
+    .sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+
+  for (const msg of allSwap) {
+    const resA = applySwapEnvelope(aliceTrade, msg);
+    if (resA.ok) aliceTrade = resA.trade;
+    const resB = applySwapEnvelope(bobTrade, msg);
+    if (resB.ok) bobTrade = resB.trade;
   }
   assert.equal(aliceTrade.state, STATE.CLAIMED);
   assert.equal(bobTrade.state, STATE.CLAIMED);

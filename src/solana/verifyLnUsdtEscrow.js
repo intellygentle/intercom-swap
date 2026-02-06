@@ -72,7 +72,7 @@ export async function verifyLnUsdtEscrowOnchain({
     return { ok: false, error: 'escrow account not found on chain', state: null };
   }
 
-  if (state.v !== 1) return { ok: false, error: `escrow state version unsupported v=${state.v}`, state };
+  if (state.v !== 2) return { ok: false, error: `escrow state version unsupported v=${state.v}`, state };
   if (state.status !== 0) {
     return { ok: false, error: `escrow is not active (status=${state.status})`, state };
   }
@@ -93,11 +93,11 @@ export async function verifyLnUsdtEscrowOnchain({
     return { ok: false, error: 'escrow vault mismatch vs message', state };
   }
 
-  const wantAmount = BigInt(String(escrowBody.amount));
-  if (state.amount !== wantAmount) {
+  const wantNetAmount = BigInt(String(escrowBody.amount));
+  if (state.netAmount !== wantNetAmount) {
     return {
       ok: false,
-      error: `escrow amount mismatch vs message (state=${state.amount} msg=${wantAmount})`,
+      error: `escrow net amount mismatch vs message (state=${state.netAmount} msg=${wantNetAmount})`,
       state,
     };
   }
@@ -123,10 +123,11 @@ export async function verifyLnUsdtEscrowOnchain({
   if (!vault.mint.equals(mint)) {
     return { ok: false, error: 'vault ATA mint mismatch vs escrow mint', state };
   }
-  if (vault.amount !== wantAmount) {
+  const wantVaultAmount = wantNetAmount + BigInt(state.feeAmount || 0n);
+  if (vault.amount !== wantVaultAmount) {
     return {
       ok: false,
-      error: `vault ATA amount mismatch (vault=${vault.amount} want=${wantAmount})`,
+      error: `vault ATA amount mismatch (vault=${vault.amount} want=${wantVaultAmount})`,
       state,
     };
   }
@@ -139,4 +140,3 @@ export async function verifyLnUsdtEscrowOnchain({
     derived_vault_ata: derivedVaultAta,
   };
 }
-

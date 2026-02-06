@@ -81,7 +81,13 @@ This repo also provides dev-oriented role scripts:
 
 This repo also provides long-running OTC “agent bots” that sit in an OTC channel, negotiate, and then hand off into a per-trade invite-only `swap:<id>` channel:
 - `scripts/otc-maker.mjs`: listens for `swap.rfq`, replies with `swap.quote`, and on `swap.quote_accept` sends a `swap.swap_invite` (welcome+invite) and joins the `swap:<id>` channel.
+  - With `--run-swap 1`, it also runs the **full swap state machine** inside the `swap:<id>` invite-only channel (terms -> invoice -> escrow).
 - `scripts/otc-taker.mjs`: sends a `swap.rfq`, waits for a `swap.quote`, sends `swap.quote_accept`, waits for `swap.swap_invite`, then joins the `swap:<id>` channel.
+  - With `--run-swap 1`, it also runs the **full swap state machine** (accept -> verify escrow on-chain -> pay LN -> claim Solana escrow).
+
+`--run-swap 1` requires:
+- LN backend configuration (e2e uses CLN via Docker Compose; production can use local `lightning-cli`).
+- Solana RPC + keypair paths stored under `onchain/` + the SPL mint (`USDT` on mainnet).
 
 These bots are designed for:
 - unattended end-to-end tests (`--once`)
@@ -707,6 +713,16 @@ This repo contains a **local-only, unattended e2e harness** for a near-atomic sw
 
 Hard rule: **no escrow verified, no LN payment sent**. If escrow is unavailable, cancel the trade (do not downgrade to sequential settlement).
 
+### Solana Program Fees (Program-Wide)
+The Solana escrow program includes a **single** program-wide `config` PDA (seed `b"config"`) that controls fees:
+- `fee_bps` is capped at **2500 bps (25%)**.
+- The depositor funds `net_amount + fee_amount`, while the recipient receives exactly `net_amount`.
+- Fees accrue into a **fee-vault ATA** owned by the config PDA (per mint), and the fee collector can withdraw them at any time.
+
+Operational notes:
+- The `config` PDA must be initialized once per cluster before `init_escrow` will work.
+- In this fork, the config authority and `fee_collector` are intentionally the **same key** (the fee collector controls the config).
+
 For operators/agents, use:
 - `scripts/swapctl.sh verify-prepay --terms-json @terms.json --invoice-json @invoice.json --escrow-json @escrow.json --solana-rpc-url <rpc>`  
   (fails closed: any mismatch -> do not pay).
@@ -736,6 +752,7 @@ What `npm run test:e2e` does:
   - `alice`: service/escrow depositor + LN invoice receiver (channel owner).
   - `bob`: client/LN payer + escrow claimer (has an invite).
   - `eve`: uninvited peer that joins the swap topic; must receive **zero** swap messages (confidentiality regression test).
+- Runs the OTC maker/taker bots (`scripts/otc-maker.mjs`, `scripts/otc-taker.mjs`) in `--run-swap 1` mode to execute the full swap inside the invite-only swap channel.
 
 ### Production Notes (Not Implemented Here Yet)
 - Lightning mainnet/testnet: run your own CLN/LND and connect via RPC credentials stored under `onchain/`.
