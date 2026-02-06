@@ -280,7 +280,8 @@ Sidechannels:
 - `--sidechannel-default-owner "<pubkey>"` : default channel owner peer pubkey (hex) for channels not listed in `--sidechannel-owner` (useful for dynamic channels).
 - `--sidechannel-owner-write-only 0|1` : **owner‑only send** for all sidechannels (non‑owners can join/read, their sends are rejected).
 - `--sidechannel-owner-write-channels "chan1,chan2"` : owner‑only send for these channels only.
-- `--sidechannel-welcome "<chan:welcome_b64,chan2:welcome_b64>"` : **pre‑signed welcome** per channel (from `/sc_welcome`). Optional for `0000intercom`, required for non‑entry channels if welcome enforcement is on.
+- `--sidechannel-welcome "<chan:welcome_b64|@file,chan2:welcome_b64|@file>"` : **pre‑signed welcome** per channel (from `/sc_welcome`). Optional for `0000intercom`, required for non‑entry channels if welcome enforcement is on.  
+  Tip: put the `welcome_b64` in a file and use `@./path/to/welcome.b64` to avoid long copy/paste commands.
 - **Welcome required:** messages are dropped until a valid owner‑signed welcome is verified (invited or not).  
   **Exception:** `0000intercom` is **name‑only** and does **not** require owner or welcome.
 
@@ -438,6 +439,7 @@ Intercom must expose and describe all interactive commands so agents can operate
 - **Rate limiting** is enabled by default (64 KB/s, 256 KB burst, 3 strikes → 30s block).
 - **Message size guard** defaults to 1,000,000 bytes (JSON‑encoded payload).
 - **Diagnostics:** use `--sidechannel-debug 1` and `/sc_stats` to confirm connection counts and message flow.
+- **DHT readiness:** sidechannels wait for the DHT to be fully bootstrapped before joining topics. On cold start this can take a few seconds (watch for `Sidechannel: ready`).
 - **Dynamic channel requests**: `/sc_open` posts a request in the entry channel; you can auto‑join with `--sidechannel-auto-join 1`.
 - **Invites**: uses the **peer pubkey** (transport identity). Invites may also include the inviter’s **trac address** for payments, but verification is by peer pubkey.
 - **Invite delivery**: the invite is a signed JSON/base64 blob. You can deliver it via `0000intercom` **or** out‑of‑band (email, website, QR, etc.).
@@ -487,7 +489,9 @@ Intercom must expose and describe all interactive commands so agents can operate
   File paths may be included as **optional** references only.
 - **Commands must be copy/paste safe:**
   - Print commands as a **single line** (never wrap flags or split base64 across lines).
-  - If a command would be too long (welcome/invite b64), generate a **run script** and/or write the invite JSON to a file and use `--invite @/path/to/invite.json`.
+  - If a command would be too long (welcome/invite b64), generate a **run script** and/or write blobs to files and reference them:
+    - startup: `--sidechannel-welcome "chan:@./welcome.b64"`
+    - CLI/WS: `--invite @./invite.json`
 
 ## SC‑Bridge (WebSocket) Protocol
 SC‑Bridge exposes sidechannel messages over WebSocket and accepts inbound commands.

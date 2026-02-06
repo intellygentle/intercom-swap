@@ -110,6 +110,15 @@ const parseWelcomeValue = (raw) => {
   if (!raw) return null;
   let text = String(raw || '').trim();
   if (!text) return null;
+  if (text.startsWith('@')) {
+    try {
+      const filePath = path.resolve(text.slice(1));
+      text = String(fs.readFileSync(filePath, 'utf8') || '').trim();
+      if (!text) return null;
+    } catch (_e) {
+      return null;
+    }
+  }
   if (text.startsWith('b64:')) text = text.slice(4);
   if (text.startsWith('{')) {
     try {
