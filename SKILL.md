@@ -77,6 +77,11 @@ This repo also includes `scripts/swaprecover.mjs` (with wrappers `scripts/swapre
 - list/show local trade receipts from a local-only SQLite DB under `onchain/` (gitignored)
 - recover a stuck claim on Solana if the agent crashed after paying LN (requires `ln_preimage_hex` to be available in receipts)
 
+This repo also includes `scripts/escrowctl.mjs` (with wrappers `scripts/escrowctl.sh` and `scripts/escrowctl.ps1`) to deterministically:
+- inspect Solana escrow/config state (`config-get`, `escrow-get`)
+- manage program-wide fee config (`config-init`, `config-set`)
+- withdraw accrued fees (`fees-balance`, `fees-withdraw`)
+
 If a request cannot be fulfilled with a one-liner, create role-specific scripts (service vs client) that fully specify flags, channels, RPC endpoints, and wallet paths.
 
 This repo also provides dev-oriented role scripts:
@@ -753,6 +758,18 @@ The Solana escrow program includes a **single** program-wide `config` PDA (seed 
 Operational notes:
 - The `config` PDA must be initialized once per cluster before `init_escrow` will work.
 - In this fork, the config authority and `fee_collector` are intentionally the **same key** (the fee collector controls the config).
+
+Operator tooling:
+- Inspect config:
+  - `scripts/escrowctl.sh config-get --solana-rpc-url <rpc>`
+- Initialize or update fees (fee collector keypair is the config authority):
+  - `scripts/escrowctl.sh config-init --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json --fee-bps 100`
+  - `scripts/escrowctl.sh config-set --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json --fee-bps 100`
+  - Add `--simulate 1` to dry-run on the RPC without broadcasting.
+- Withdraw fees (per mint):
+  - `scripts/escrowctl.sh fees-balance --solana-rpc-url <rpc> --mint <mint>`
+  - `scripts/escrowctl.sh fees-withdraw --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json --mint <mint> --amount 0`
+    - `--amount 0` means “withdraw all”.
 
 For operators/agents, use:
 - `scripts/swapctl.sh verify-prepay --terms-json @terms.json --invoice-json @invoice.json --escrow-json @escrow.json --solana-rpc-url <rpc>`  

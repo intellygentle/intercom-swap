@@ -34,6 +34,7 @@ $scToken = (Get-Content -Raw -Path $tokenFile).Trim()
 pear run . `
   --peer-store-name $storeName `
   --msb 0 `
+  --price-oracle 1 `
   --sc-bridge 1 `
   --sc-bridge-token $scToken `
   --sc-bridge-port $scPort `
@@ -43,4 +44,3 @@ pear run . `
   --sidechannel-invite-required 1 `
   --sidechannel-invite-prefixes "swap:" `
   --sidechannel-inviter-keys $inviterKeys
-

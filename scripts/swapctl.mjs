@@ -33,6 +33,7 @@ Connection flags (required for SC-Bridge commands):
 Commands:
   info
   stats
+  price-get
   watch [--channels <a,b,c>] [--kinds <k1,k2>] [--trade-id <id>] [--pretty 0|1] [--raw 0|1]
   join --channel <name> [--invite <b64|json|@file>] [--welcome <b64|json|@file>]
   open --channel <name> --via <entryChannel> [--invite ...] [--welcome ...]
@@ -239,6 +240,12 @@ async function main() {
 
   if (cmd === 'stats') {
     const res = await withScBridge({ url, token }, (sc) => sc.stats());
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
+    return;
+  }
+
+  if (cmd === 'price-get') {
+    const res = await withScBridge({ url, token }, (sc) => sc.priceGet());
     process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
     return;
   }

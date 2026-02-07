@@ -44,6 +44,7 @@ SC_TOKEN="$(tr -d '\r\n' <"$TOKEN_FILE")"
 exec pear run . \
   --peer-store-name "$STORE_NAME" \
   --msb 0 \
+  --price-oracle 1 \
   --sc-bridge 1 \
   --sc-bridge-token "$SC_TOKEN" \
   --sc-bridge-port "$SC_PORT" \
@@ -53,4 +54,3 @@ exec pear run . \
   --sidechannel-invite-required 1 \
   --sidechannel-invite-prefixes "swap:" \
   --sidechannel-inviter-keys "$INVITER_KEYS"
-
