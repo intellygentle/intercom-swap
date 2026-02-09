@@ -63,6 +63,12 @@ function parseArgs(argv) {
 }
 
 function json(res, status, body) {
+  if (res.headersSent || res.writableEnded) {
+    try {
+      res.end();
+    } catch (_e) {}
+    return;
+  }
   const text = JSON.stringify(body, null, 2);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',

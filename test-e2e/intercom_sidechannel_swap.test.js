@@ -346,13 +346,16 @@ async function sendUntilReceived({
   delayMs = 500,
   perTryTimeoutMs = 1500,
 }) {
+  // IMPORTANT: keep a fixed baseline so late-arriving messages from previous attempts
+  // are still observed (avoid a flake where delivery happens just after perTryTimeoutMs,
+  // and then gets excluded by the next attempt's "before" snapshot).
+  const startLen = receiverSeen.length;
   await retry(
     async () => {
-      const before = receiverSeen.length;
       const res = await sender.send(channel, message, sendOptions);
       assert.equal(res.type, 'sent');
       await waitFor(
-        () => receiverSeen.slice(before).some(match),
+        () => receiverSeen.slice(startLen).some(match),
         { timeoutMs: perTryTimeoutMs, intervalMs: 50, label: `${label} (per try)` }
       );
     },

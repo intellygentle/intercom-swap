@@ -91,8 +91,7 @@ export async function scListBefore({
     cursor = await cursor.continue();
   }
   await tx.done;
-  // Return ascending for natural “prepend” order.
-  out.reverse();
+  // Return newest-first (descending by id) so the UI can render latest at top.
   return out;
 }
 
@@ -124,11 +123,10 @@ export async function promptListBefore({
     cursor = await cursor.continue();
   }
   await tx.done;
-  out.reverse();
+  // Return newest-first (descending by id) so the UI can render latest at top.
   return out;
 }
 
 export async function promptListLatest({ limit = 200 }: { limit?: number } = {}): Promise<PromptEventStored[]> {
   return promptListBefore({ beforeId: null, limit });
 }
-

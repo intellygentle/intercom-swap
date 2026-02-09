@@ -23,31 +23,20 @@
 
 .shell {
   --nav-w: 260px;
-  --console-w: 340px;
-  --console-h: 280px;
-  --inspector-h: 280px;
 
   height: 100%;
   display: grid;
-  grid-template-rows: 66px 1fr var(--inspector-h);
-  grid-template-columns: var(--nav-w) 1fr var(--console-w);
+  grid-template-rows: 66px 1fr;
+  grid-template-columns: var(--nav-w) 1fr;
   grid-template-areas:
-    "topbar topbar topbar"
-    "nav main prompt"
-    "inspector inspector inspector";
+    "topbar topbar"
+    "nav main";
   gap: 12px;
   padding: 12px;
 }
 
 .shell.nav-closed {
   --nav-w: 0px;
-}
-.shell.inspector-closed {
-  --inspector-h: 0px;
-}
-.shell.prompt-closed {
-  --console-w: 0px;
-  --console-h: 44px;
 }
 
 .topbar {
@@ -249,12 +238,7 @@
   grid-area: main;
   min-width: 0;
   min-height: 0;
-}
-
-.inspector {
-  grid-area: inspector;
-  min-width: 0;
-  min-height: 0;
+  overflow: auto;
 }
 
 .grid2 {
@@ -262,6 +246,32 @@
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   height: 100%;
+}
+
+@media (max-width: 980px) {
+  .shell {
+    /* Keep main full-width; nav becomes an overlay drawer. */
+    grid-template-columns: 0px 1fr;
+  }
+  .grid2 {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+  .nav {
+    position: fixed;
+    top: 78px;
+    left: 12px;
+    bottom: 12px;
+    width: min(82vw, 340px);
+    z-index: 50;
+  }
+}
+
+.gridform {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  width: 100%;
 }
 
 .panel {
@@ -463,7 +473,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  justify-content: space-between;
+  justify-content: flex-start;
+  flex-wrap: wrap;
 }
 .rowitem-mid {
   display: flex;
@@ -475,6 +486,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .code {
@@ -575,6 +587,51 @@
   background: rgba(249, 115, 22, 0.08);
 }
 
+.toasts {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(520px, calc(100vw - 28px));
+}
+.toast {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow: var(--shadow-soft);
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.toast strong {
+  font-weight: 700;
+}
+.toast .x {
+  border: 0;
+  background: transparent;
+  color: rgba(230, 240, 245, 0.72);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.toast.info {
+  border-color: rgba(34, 211, 238, 0.30);
+}
+.toast.success {
+  border-color: rgba(132, 204, 22, 0.30);
+}
+.toast.error {
+  border-color: rgba(244, 63, 94, 0.38);
+}
+
 .toolhelp {
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -630,21 +687,35 @@
   background: rgba(244, 63, 94, 0.06);
 }
 
+.feedhdr {
+  margin: 6px 6px 2px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.20);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  backdrop-filter: blur(8px);
+}
+
 /* Responsive: collapse to 1 column; nav/inspector become drawers */
 @media (max-width: 980px) {
   .shell {
     grid-template-columns: 1fr;
-    grid-template-rows: 66px 1fr var(--console-h);
+    grid-template-rows: 66px 1fr;
     grid-template-areas:
       "topbar"
-      "main"
-      "prompt";
+      "main";
   }
-  .nav,
-  .inspector {
+  .nav {
     position: fixed;
     top: 84px;
-    bottom: calc(var(--console-h) + 12px);
+    bottom: 12px;
     width: min(320px, calc(100vw - 24px));
     z-index: 40;
     box-shadow: var(--shadow);
@@ -657,18 +728,11 @@
   .shell.nav-open .nav {
     transform: translateX(0);
   }
-  .inspector {
-    right: 12px;
-    transform: translateX(110%);
-    transition: transform 180ms ease;
-  }
-  .shell.inspector-open .inspector {
-    transform: translateX(0);
-  }
   .grid2 {
     grid-template-columns: 1fr;
   }
-  .topbar-mid {
-    display: none;
+
+  .gridform {
+    grid-template-columns: 1fr;
   }
 }

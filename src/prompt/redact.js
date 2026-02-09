@@ -14,8 +14,10 @@ function shouldRedactKey(key) {
 
   // Swap-sensitive material.
   if (k.includes('preimage')) return true;
-  if (k.includes('invite')) return true;
-  if (k.includes('welcome')) return true;
+  // Invites/welcomes: redact only the payload fields (base64 blobs or nested objects), not
+  // non-secret policy fields like invite_required/invite_prefixes/inviter_keys.
+  if (k === 'invite' || k === 'invite_b64' || k.endsWith('_invite_b64')) return true;
+  if (k === 'welcome' || k === 'welcome_b64' || k.endsWith('_welcome_b64')) return true;
 
   return false;
 }
@@ -52,4 +54,3 @@ export function redactSensitive(value, { maxString = 2000 } = {}) {
     return '<unserializable>';
   }
 }
-

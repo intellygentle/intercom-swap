@@ -240,8 +240,11 @@ function extractToolCallFromText(content, { allowedNames }) {
 function shouldSealKey(key) {
   const k = String(key || '').toLowerCase();
   if (k.includes('preimage')) return true;
-  if (k.includes('invite')) return true;
-  if (k.includes('welcome')) return true;
+
+  // Invites/welcomes: seal only the actual payload fields, not policy/metadata fields like
+  // invite_required/invite_prefixes/inviter_keys which are safe and needed for operator UX.
+  if (k === 'invite' || k === 'invite_b64' || k.endsWith('_invite_b64')) return true;
+  if (k === 'welcome' || k === 'welcome_b64' || k.endsWith('_welcome_b64')) return true;
 
   // Credentials/secrets.
   if (k.includes('api_key') || k.includes('apikey')) return true;

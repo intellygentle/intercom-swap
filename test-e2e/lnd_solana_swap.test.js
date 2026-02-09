@@ -267,8 +267,19 @@ test('e2e: LND(regtest) <-> Solana escrow happy+refund', async (t) => {
   const aliceInfo = await lndCli('lnd-alice', ['getinfo']);
   const aliceNodeId = String(aliceInfo?.identity_pubkey || '').trim();
   assert.ok(aliceNodeId, 'alice identity_pubkey required');
-  await lndCli('lnd-bob', ['connect', `${aliceNodeId}@lnd-alice:9735`]);
-  await lndCli('lnd-bob', ['openchannel', '--node_key', aliceNodeId, '--local_amt', '1000000']);
+  // Make this idempotent across repeated local runs (volumes may persist if a previous run was interrupted).
+  try {
+    await lndCli('lnd-bob', ['connect', `${aliceNodeId}@lnd-alice:9735`]);
+  } catch (err) {
+    const msg = String(err?.stderr || err?.message || err || '');
+    if (!/already connected/i.test(msg)) throw err;
+  }
+
+  const existing = await lndCli('lnd-bob', ['listchannels']);
+  const hasChan = Boolean(existing?.channels?.some?.((c) => c?.remote_pubkey === aliceNodeId));
+  if (!hasChan) {
+    await lndCli('lnd-bob', ['openchannel', '--node_key', aliceNodeId, '--local_amt', '1000000']);
+  }
   await btcCli(['-rpcwallet=miner', 'generatetoaddress', '6', minerAddr]);
   await retry(async () => {
     const chans = await lndCli('lnd-bob', ['listchannels']);

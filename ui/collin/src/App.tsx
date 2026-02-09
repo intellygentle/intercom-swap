@@ -5,11 +5,18 @@ import { promptAdd, promptListBefore, promptListLatest, scAdd, scListBefore, scL
 
 function App() {
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'rendezvous' | 'offers' | 'rfqs' | 'invites' | 'swaps' | 'refunds' | 'wallets' | 'peers' | 'audit' | 'settings'
+    | 'overview'
+    | 'prompt'
+    | 'sell_usdt'
+    | 'sell_btc'
+    | 'invites'
+    | 'trade_actions'
+    | 'refunds'
+    | 'wallets'
+    | 'console'
+    | 'settings'
   >('overview');
 
-  const [promptOpen, setPromptOpen] = useState(true);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
   const [navOpen, setNavOpen] = useState(true);
 
   const [health, setHealth] = useState<{ ok: boolean; ts: number } | null>(null);
@@ -20,17 +27,19 @@ function App() {
   const [runMode, setRunMode] = useState<'tool' | 'llm'>('tool');
 
   const [scConnected, setScConnected] = useState(false);
+  const [scConnecting, setScConnecting] = useState(false);
   const [scStreamErr, setScStreamErr] = useState<string | null>(null);
-  const [scFollowTail, setScFollowTail] = useState(true);
   const [scChannels, setScChannels] = useState<string>('0000intercomswapbtcusdt');
   const [scFilter, setScFilter] = useState<{ channel: string; kind: string }>({ channel: '', kind: '' });
 
-  const [selected, setSelected] = useState<any>(null);
+	  const [selected, setSelected] = useState<any>(null);
 
-  const [promptInput, setPromptInput] = useState('');
-  const [toolFilter, setToolFilter] = useState('');
-  const [toolName, setToolName] = useState('');
-  const [toolArgsText, setToolArgsText] = useState('{\n  \n}');
+	  const [promptInput, setPromptInput] = useState('');
+	  const [promptChat, setPromptChat] = useState<Array<{ id: string; role: 'user' | 'assistant'; ts: number; text: string }>>([]);
+	  const promptChatListRef = useRef<HTMLDivElement | null>(null);
+	  const [toolFilter, setToolFilter] = useState('');
+	  const [toolName, setToolName] = useState('');
+	  const [toolArgsText, setToolArgsText] = useState('{\n  \n}');
   const [toolInputMode, setToolInputMode] = useState<'form' | 'json'>('form');
   const [toolArgsObj, setToolArgsObj] = useState<Record<string, any>>({});
   const [toolArgsParseErr, setToolArgsParseErr] = useState<string | null>(null);
@@ -46,13 +55,41 @@ function App() {
   const [consoleEvents, setConsoleEvents] = useState<any[]>([]);
   const consoleEventsMax = 500;
   const consoleListRef = useRef<HTMLDivElement | null>(null);
-  const [consoleFollowTail, setConsoleFollowTail] = useState(true);
 
   const [preflight, setPreflight] = useState<any>(null);
   const [preflightBusy, setPreflightBusy] = useState(false);
   const [envInfo, setEnvInfo] = useState<any>(null);
   const [envBusy, setEnvBusy] = useState(false);
   const [envErr, setEnvErr] = useState<string | null>(null);
+
+  type ToastKind = 'info' | 'success' | 'error';
+  type Toast = { id: string; kind: ToastKind; message: string; ts: number };
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastTimersRef = useRef<Map<string, any>>(new Map());
+  function pushToast(kind: ToastKind, message: string, { ttlMs }: { ttlMs?: number } = {}) {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const ts = Date.now();
+    const toast: Toast = { id, kind, message, ts };
+    setToasts((prev) => [toast].concat(prev).slice(0, 6));
+    const ttl = typeof ttlMs === 'number' ? ttlMs : kind === 'error' ? 10_000 : 4_500;
+    const timer = setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+      toastTimersRef.current.delete(id);
+    }, ttl);
+    toastTimersRef.current.set(id, timer);
+  }
+  function dismissToast(id: string) {
+    const t = toastTimersRef.current.get(id);
+    if (t) clearTimeout(t);
+    toastTimersRef.current.delete(id);
+    setToasts((prev) => prev.filter((x) => x.id !== id));
+  }
+  useEffect(() => {
+    return () => {
+      for (const t of toastTimersRef.current.values()) clearTimeout(t);
+      toastTimersRef.current.clear();
+    };
+  }, []);
 
   // Human-friendly funding helpers (so operators don’t have to fish JSON out of logs).
   const [lnFundingAddr, setLnFundingAddr] = useState<string | null>(null);
@@ -64,6 +101,34 @@ function App() {
   const [lnChannelNodeId, setLnChannelNodeId] = useState<string>('');
   const [lnChannelAmountSats, setLnChannelAmountSats] = useState<number>(1_000_000);
   const [lnChannelPrivate, setLnChannelPrivate] = useState<boolean>(true);
+
+  // Sell USDT: offer announcer (non-binding discovery message).
+  const [offerName, setOfferName] = useState<string>('maker:offer');
+  const [offerBtcSats, setOfferBtcSats] = useState<number>(10_000);
+  const [offerUsdtAtomic, setOfferUsdtAtomic] = useState<string>('1000000'); // 1.000000 USDT
+  const [offerMaxPlatformFeeBps, setOfferMaxPlatformFeeBps] = useState<number>(50); // 0.5%
+  const [offerMaxTradeFeeBps, setOfferMaxTradeFeeBps] = useState<number>(50); // 0.5%
+  const [offerMaxTotalFeeBps, setOfferMaxTotalFeeBps] = useState<number>(100); // 1.0%
+  const [offerMinSolRefundWindowSec, setOfferMinSolRefundWindowSec] = useState<number>(72 * 3600);
+  const [offerMaxSolRefundWindowSec, setOfferMaxSolRefundWindowSec] = useState<number>(7 * 24 * 3600);
+  const [offerValidUntilUnix, setOfferValidUntilUnix] = useState<number>(() => Math.floor(Date.now() / 1000) + 72 * 3600);
+  const [offerBusy, setOfferBusy] = useState(false);
+
+  // Sell BTC: RFQ poster (binding direction BTC_LN->USDT_SOL).
+  const [rfqChannel, setRfqChannel] = useState<string>('0000intercomswapbtcusdt');
+  const [rfqTradeId, setRfqTradeId] = useState<string>(() => `rfq-${Date.now()}`);
+  const [rfqBtcSats, setRfqBtcSats] = useState<number>(10_000);
+  const [rfqUsdtAtomic, setRfqUsdtAtomic] = useState<string>('1000000'); // 1.000000 USDT
+  const [rfqMaxPlatformFeeBps, setRfqMaxPlatformFeeBps] = useState<number>(50); // 0.5%
+  const [rfqMaxTradeFeeBps, setRfqMaxTradeFeeBps] = useState<number>(50); // 0.5%
+  const [rfqMaxTotalFeeBps, setRfqMaxTotalFeeBps] = useState<number>(100); // 1.0%
+  const [rfqMinSolRefundWindowSec, setRfqMinSolRefundWindowSec] = useState<number>(72 * 3600);
+  const [rfqMaxSolRefundWindowSec, setRfqMaxSolRefundWindowSec] = useState<number>(7 * 24 * 3600);
+  const [rfqValidUntilUnix, setRfqValidUntilUnix] = useState<number>(() => Math.floor(Date.now() / 1000) + 72 * 3600);
+  const [rfqBusy, setRfqBusy] = useState(false);
+
+  const [leaveChannel, setLeaveChannel] = useState<string>('');
+  const [leaveBusy, setLeaveBusy] = useState(false);
 
   // Local receipts-driven views (paginated; memory-safe).
   const [trades, setTrades] = useState<any[]>([]);
@@ -83,17 +148,14 @@ function App() {
   const [openClaims, setOpenClaims] = useState<any[]>([]);
   const [openClaimsOffset, setOpenClaimsOffset] = useState(0);
   const [openClaimsHasMore, setOpenClaimsHasMore] = useState(true);
-  const [openClaimsLoading, setOpenClaimsLoading] = useState(false);
-  const openClaimsLimit = 50;
-  const openClaimsListRef = useRef<HTMLDivElement | null>(null);
+	  const [openClaimsLoading, setOpenClaimsLoading] = useState(false);
+	  const openClaimsLimit = 50;
+	  const openClaimsListRef = useRef<HTMLDivElement | null>(null);
 
-  const [peerStatus, setPeerStatus] = useState<any>(null);
-  const [peerStatusBusy, setPeerStatusBusy] = useState(false);
-  const [rfqbotStatus, setRfqbotStatus] = useState<any>(null);
-  const [rfqbotStatusBusy, setRfqbotStatusBusy] = useState(false);
-
-  const scAbortRef = useRef<AbortController | null>(null);
-  const promptAbortRef = useRef<AbortController | null>(null);
+	  const scAbortRef = useRef<AbortController | null>(null);
+	  const scStreamGenRef = useRef(0);
+	  const scStreamWantedRef = useRef(true);
+	  const promptAbortRef = useRef<AbortController | null>(null);
 
   const scListRef = useRef<HTMLDivElement | null>(null);
   const promptListRef = useRef<HTMLDivElement | null>(null);
@@ -101,16 +163,8 @@ function App() {
   const scLoadingOlderRef = useRef(false);
   const promptLoadingOlderRef = useRef(false);
 
-  const scFollowTailRef = useRef(scFollowTail);
-  useEffect(() => {
-    scFollowTailRef.current = scFollowTail;
-  }, [scFollowTail]);
-
-  const promptFollowTailRef = useRef(true);
-  const [promptFollowTail, setPromptFollowTail] = useState(true);
-  useEffect(() => {
-    promptFollowTailRef.current = promptFollowTail;
-  }, [promptFollowTail]);
+  // Logs render newest-first. If the operator is scrolled away from the top, keep their viewport stable
+  // when new events arrive (avoid jumpiness).
 
   const filteredScEvents = useMemo(() => {
     const chan = scFilter.channel.trim();
@@ -130,24 +184,35 @@ function App() {
     return filteredScEvents.filter((e) => String(e.kind || '') === 'swap.svc_announce');
   }, [filteredScEvents]);
 
+  function finalEventContentJson(e: any) {
+    // promptd emits {type:"final", content_json: {...}} (not wrapped).
+    if (!e || typeof e !== 'object') return null;
+    if (String((e as any).type || '') !== 'final') return null;
+    const cj = (e as any).content_json;
+    if (cj && typeof cj === 'object') return cj;
+    const c = (e as any).content;
+    if (typeof c === 'string' && c.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(c);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+      } catch (_e) {}
+    }
+    return null;
+  }
+
   const myOfferPosts = useMemo(() => {
     // Offer announcements we posted locally (derived from prompt tool results).
     const out: any[] = [];
     const seen = new Set<string>();
     for (const e of promptEvents) {
       try {
-        if (!e || typeof e !== 'object') continue;
-        if (String(e.type || '') !== 'prompt_event') continue;
-        const evt = (e as any).evt;
-        if (!evt || typeof evt !== 'object') continue;
-        if (String(evt.type || '') !== 'final') continue;
-        const cj = evt.content_json;
-        if (!cj || typeof cj !== 'object') continue;
+        const cj = finalEventContentJson(e);
+        if (!cj) continue;
         if (String(cj.type || '') !== 'offer_posted') continue;
         const env = cj.envelope;
         if (!env || typeof env !== 'object') continue;
         const id = String(cj.svc_announce_id || '').trim();
-        const key = id || String(env.trade_id || env.tradeId || '') || String(evt.db_id || '') || String(e.ts || '');
+        const key = id || String(env.trade_id || env.tradeId || '') || String((e as any).db_id || '') || String(e.ts || '');
         if (!key) continue;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -158,7 +223,7 @@ function App() {
           channels: chans,
           rfq_channels: Array.isArray(cj.rfq_channels) ? cj.rfq_channels : [],
           trade_id: String(env.trade_id || env.tradeId || '').trim(),
-          ts: typeof env.ts === 'number' ? env.ts : typeof evt.ts === 'number' ? evt.ts : typeof e.ts === 'number' ? e.ts : Date.now(),
+          ts: typeof env.ts === 'number' ? env.ts : typeof e.ts === 'number' ? e.ts : Date.now(),
           message: env,
           kind: String(env.kind || ''),
           dir: 'out',
@@ -177,25 +242,20 @@ function App() {
     const seen = new Set<string>();
     for (const e of promptEvents) {
       try {
-        if (!e || typeof e !== 'object') continue;
-        if (String(e.type || '') !== 'prompt_event') continue;
-        const evt = (e as any).evt;
-        if (!evt || typeof evt !== 'object') continue;
-        if (String(evt.type || '') !== 'final') continue;
-        const cj = evt.content_json;
-        if (!cj || typeof cj !== 'object') continue;
+        const cj = finalEventContentJson(e);
+        if (!cj) continue;
         if (String(cj.type || '') !== 'rfq_posted') continue;
         const env = cj.envelope;
         if (!env || typeof env !== 'object') continue;
         const rfqId = String(cj.rfq_id || '').trim();
-        const key = rfqId || String(env.trade_id || env.tradeId || '') || String(evt.db_id || '') || String(e.ts || '');
+        const key = rfqId || String(env.trade_id || env.tradeId || '') || String((e as any).db_id || '') || String(e.ts || '');
         if (!key) continue;
         if (seen.has(key)) continue;
         seen.add(key);
         out.push({
           channel: String(cj.channel || '').trim(),
           trade_id: String(env.trade_id || env.tradeId || '').trim(),
-          ts: typeof env.ts === 'number' ? env.ts : typeof evt.ts === 'number' ? evt.ts : typeof e.ts === 'number' ? e.ts : Date.now(),
+          ts: typeof env.ts === 'number' ? env.ts : typeof e.ts === 'number' ? e.ts : Date.now(),
           message: env,
           kind: String(env.kind || ''),
           dir: 'out',
@@ -221,6 +281,24 @@ function App() {
     return Array.from(set).sort();
   }, [scEvents, scChannels]);
 
+  const sellUsdtFeedItems = useMemo(() => {
+    const out: any[] = [];
+    out.push({ _t: 'header', id: 'h:myoffers', title: 'My Offers', count: myOfferPosts.length });
+    for (const e of myOfferPosts) out.push({ _t: 'offer', id: `my:${e.svc_announce_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
+    out.push({ _t: 'header', id: 'h:inboxoffers', title: 'Offer Inbox', count: offerEvents.length });
+    for (const e of offerEvents) out.push({ _t: 'offer', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
+    return out;
+  }, [myOfferPosts, offerEvents]);
+
+  const sellBtcFeedItems = useMemo(() => {
+    const out: any[] = [];
+    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My RFQs', count: myRfqPosts.length });
+    for (const e of myRfqPosts) out.push({ _t: 'rfq', id: `my:${e.rfq_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
+    out.push({ _t: 'header', id: 'h:inboxrfqs', title: 'RFQ Inbox', count: rfqEvents.length });
+    for (const e of rfqEvents) out.push({ _t: 'rfq', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
+    return out;
+  }, [myRfqPosts, rfqEvents]);
+
   function oldestDbId(list: any[]) {
     let min = Number.POSITIVE_INFINITY;
     for (const e of list) {
@@ -235,9 +313,6 @@ function App() {
     const beforeId = oldestDbId(scEvents);
     if (!beforeId) return;
     scLoadingOlderRef.current = true;
-    const el = scListRef.current;
-    const prevHeight = el ? el.scrollHeight : 0;
-    const prevTop = el ? el.scrollTop : 0;
     try {
       const older = await scListBefore({ beforeId, limit });
       if (!older || older.length === 0) return;
@@ -245,16 +320,10 @@ function App() {
       setScEvents((prev) => {
         const seen = new Set(prev.map((e) => e?.db_id).filter((n) => typeof n === 'number'));
         const toAdd = mapped.filter((e) => typeof e?.db_id === 'number' && !seen.has(e.db_id));
-        const next = toAdd.concat(prev);
+        const next = prev.concat(toAdd);
         if (next.length <= scEventsMax) return next;
-        // If we’re scrolling back, keep older window and drop the newest.
+        // Keep newest window and drop oldest.
         return next.slice(0, scEventsMax);
-      });
-      requestAnimationFrame(() => {
-        const el2 = scListRef.current;
-        if (!el2) return;
-        const delta = el2.scrollHeight - prevHeight;
-        if (delta > 0) el2.scrollTop = prevTop + delta;
       });
     } finally {
       scLoadingOlderRef.current = false;
@@ -266,9 +335,6 @@ function App() {
     const beforeId = oldestDbId(promptEvents);
     if (!beforeId) return;
     promptLoadingOlderRef.current = true;
-    const el = promptListRef.current;
-    const prevHeight = el ? el.scrollHeight : 0;
-    const prevTop = el ? el.scrollTop : 0;
     try {
       const older = await promptListBefore({ beforeId, limit });
       if (!older || older.length === 0) return;
@@ -276,15 +342,9 @@ function App() {
       setPromptEvents((prev) => {
         const seen = new Set(prev.map((e) => e?.db_id).filter((n) => typeof n === 'number'));
         const toAdd = mapped.filter((e) => typeof e?.db_id === 'number' && !seen.has(e.db_id));
-        const next = toAdd.concat(prev);
+        const next = prev.concat(toAdd);
         if (next.length <= promptEventsMax) return next;
         return next.slice(0, promptEventsMax);
-      });
-      requestAnimationFrame(() => {
-        const el2 = promptListRef.current;
-        if (!el2) return;
-        const delta = el2.scrollHeight - prevHeight;
-        if (delta > 0) el2.scrollTop = prevTop + delta;
       });
     } finally {
       promptLoadingOlderRef.current = false;
@@ -359,8 +419,8 @@ function App() {
     const okPeer = Boolean(preflight?.peer_status?.peers?.some?.((p: any) => Boolean(p?.alive)));
     if (okChecklist && !okPeer) reasons.push('peer not running');
 
-    const okStream = Boolean(scConnected);
-    if (okChecklist && !okStream) reasons.push('sc/stream not connected');
+	    const okStream = Boolean(scConnected);
+	    if (okChecklist && !okStream) reasons.push(scConnecting ? 'sc/stream connecting...' : 'sc/stream not connected');
 
     const okLn =
       Boolean(preflight?.ln_summary?.channels && Number(preflight.ln_summary.channels) > 0) &&
@@ -392,7 +452,7 @@ function App() {
       okReceipts,
       okApp,
     };
-  }, [health, preflight, scConnected, envInfo]);
+	  }, [health, preflight, scConnected, scConnecting, envInfo]);
 
   const stackAnyRunning = useMemo(() => {
     try {
@@ -444,61 +504,232 @@ function App() {
     return out;
   }
 
-  async function stackStart() {
-    if (stackOpBusy) return;
-    setStackOpBusy(true);
-    setRunErr(null);
+  async function runToolFinal(name: string, args: any, { auto_approve = true } = {}) {
+    const prompt = JSON.stringify({ type: 'tool', name, arguments: args && typeof args === 'object' ? args : {} });
+    const out = await fetchJson('/v1/run', {
+      method: 'POST',
+      body: JSON.stringify({ prompt, session_id: sessionId, auto_approve, dry_run: false }),
+    });
+    if (out && typeof out === 'object' && out.session_id) setSessionId(String(out.session_id));
+    // Persist a synthetic "final" event so local outbox lists work even if sc/stream doesn't echo.
     try {
-      const sidechannels = scChannels
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, 50);
+      const ts = Date.now();
+      await appendPromptEvent(
+        {
+          type: 'final',
+          session_id: out?.session_id || sessionId,
+          content: out?.content ?? null,
+          content_json: out?.content_json ?? null,
+          steps: Array.isArray(out?.steps) ? out.steps.length : out?.steps ? 1 : 0,
+          ts,
+        },
+        { persist: true }
+      );
+    } catch (_e) {}
+    return out;
+  }
+
+	  async function stackStart() {
+	    if (stackOpBusy) return;
+	    setStackOpBusy(true);
+	    setRunErr(null);
+	    try {
+	      pushToast('info', 'Starting stack (peer + LN + Solana). This can take ~1-2 minutes...', { ttlMs: 9000 });
+	      const sidechannels = scChannels
+	        .split(',')
+	        .map((s) => s.trim())
+	        .filter(Boolean)
+	        .slice(0, 50);
 
       setRunMode('tool');
       setToolName('intercomswap_stack_start');
       setToolArgsBoth({ sidechannels });
-      setPromptOpen(true);
 
-      await runPromptStream({
-        prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_stack_start', arguments: { sidechannels } }),
-        session_id: sessionId,
-        auto_approve: true,
-        dry_run: false,
-      });
+	      const final = await runPromptStream({
+	        prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_stack_start', arguments: { sidechannels } }),
+	        session_id: sessionId,
+	        auto_approve: true,
+	        dry_run: false,
+	      });
 
-      // Refresh status and auto-connect the sidechannel stream once SC-Bridge is up.
-      await refreshPreflight();
-      if (!scConnected) {
-        await new Promise((r) => setTimeout(r, 250));
-        void startScStream();
-      }
-    } finally {
-      setStackOpBusy(false);
-    }
-  }
+	      const cj = final && typeof final === 'object' ? (final as any).content_json : null;
+	      const lnErr = cj && typeof cj === 'object' ? String((cj as any).ln_error || '').trim() : '';
+	      const solErr = cj && typeof cj === 'object' ? String((cj as any).solana_error || '').trim() : '';
+	      if (lnErr || solErr) {
+	        pushToast('error', `Stack started with issues:\n${lnErr ? `- LN: ${lnErr}\n` : ''}${solErr ? `- Solana: ${solErr}` : ''}`.trim(), {
+	          ttlMs: 12_000,
+	        });
+	      } else if (final && typeof final === 'object' && String((final as any).type || '') === 'error') {
+	        pushToast('error', String((final as any).error || 'stack start failed'));
+	      } else {
+	        pushToast('success', 'Stack started');
+	      }
 
-  async function stackStop() {
-    if (stackOpBusy) return;
-    setStackOpBusy(true);
-    setRunErr(null);
-    try {
-      stopScStream();
+	      // Refresh status and auto-connect the sidechannel stream once SC-Bridge is up.
+	      await refreshPreflight();
+	      if (!scConnected && !scConnecting && scStreamWantedRef.current) {
+	        await new Promise((r) => setTimeout(r, 250));
+	        void startScStream();
+	      }
+	    } finally {
+	      setStackOpBusy(false);
+	    }
+	  }
+
+	  async function stackStop() {
+	    if (stackOpBusy) return;
+	    setStackOpBusy(true);
+	    setRunErr(null);
+	    try {
+	      pushToast('info', 'Stopping stack...', { ttlMs: 6500 });
+	      stopScStream();
 
       setRunMode('tool');
       setToolName('intercomswap_stack_stop');
       setToolArgsBoth({});
-      setPromptOpen(true);
 
-      await runPromptStream({
-        prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_stack_stop', arguments: {} }),
-        session_id: sessionId,
-        auto_approve: true,
-        dry_run: false,
-      });
-      await refreshPreflight();
+	      const final = await runPromptStream({
+	        prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_stack_stop', arguments: {} }),
+	        session_id: sessionId,
+	        auto_approve: true,
+	        dry_run: false,
+	      });
+	      if (final && typeof final === 'object' && String((final as any).type || '') === 'error') {
+	        pushToast('error', String((final as any).error || 'stack stop failed'));
+	      } else {
+	        pushToast('success', 'Stack stopped');
+	      }
+	      await refreshPreflight();
+	    } finally {
+	      setStackOpBusy(false);
+	    }
+	  }
+
+  function stackBlockedToast(actionLabel: string) {
+    const missing = stackGate.reasons.length > 0 ? stackGate.reasons.map((r) => `- ${r}`).join('\n') : '- unknown';
+    pushToast('error', `${actionLabel}: stack not ready\n\nMissing:\n${missing}`);
+  }
+
+  async function postOffer() {
+    if (offerBusy) return;
+    if (!stackGate.ok) return void stackBlockedToast('Post offer');
+
+    const name = offerName.trim();
+    if (!name) return void pushToast('error', 'Offer name is required');
+
+    if (!Number.isInteger(offerBtcSats) || offerBtcSats < 1) return void pushToast('error', 'BTC amount must be >= 1 sat');
+    if (!/^[0-9]+$/.test(String(offerUsdtAtomic || '').trim())) return void pushToast('error', 'USDT amount must be a base-unit integer');
+
+    if (offerMaxPlatformFeeBps + offerMaxTradeFeeBps > offerMaxTotalFeeBps) {
+      return void pushToast('error', 'Fee caps invalid: total must be >= platform + trade');
+    }
+    if (offerMinSolRefundWindowSec > offerMaxSolRefundWindowSec) {
+      return void pushToast('error', 'Solana refund window invalid: min must be <= max');
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (!Number.isInteger(offerValidUntilUnix) || offerValidUntilUnix <= nowSec) {
+      return void pushToast('error', 'Expiry must be in the future');
+    }
+
+    const channels = scChannels
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    if (channels.length < 1) return void pushToast('error', 'No rendezvous channels configured');
+
+    if (toolRequiresApproval('intercomswap_offer_post') && !autoApprove) {
+      const ok = window.confirm(`Post offer now?\n\nchannels: ${channels.join(', ')}\nBTC: ${offerBtcSats} sats\nUSDT: ${offerUsdtAtomic}`);
+      if (!ok) return;
+    }
+
+    setOfferBusy(true);
+    try {
+      const args = {
+        channels,
+        name,
+        rfq_channels: channels,
+        valid_until_unix: offerValidUntilUnix,
+        offers: [
+          {
+            pair: 'BTC_LN/USDT_SOL',
+            have: 'USDT_SOL',
+            want: 'BTC_LN',
+            btc_sats: offerBtcSats,
+            usdt_amount: String(offerUsdtAtomic),
+            max_platform_fee_bps: offerMaxPlatformFeeBps,
+            max_trade_fee_bps: offerMaxTradeFeeBps,
+            max_total_fee_bps: offerMaxTotalFeeBps,
+            min_sol_refund_window_sec: offerMinSolRefundWindowSec,
+            max_sol_refund_window_sec: offerMaxSolRefundWindowSec,
+          },
+        ],
+      };
+      const out = await runToolFinal('intercomswap_offer_post', args, { auto_approve: true });
+      const cj = out?.content_json;
+      if (cj && typeof cj === 'object' && cj.type === 'error') throw new Error(String(cj.error || 'offer_post failed'));
+      const id = String(cj?.svc_announce_id || '').trim();
+      pushToast('success', `Offer posted${id ? ` (${id.slice(0, 12)}…)` : ''}`);
+    } catch (e: any) {
+      pushToast('error', e?.message || String(e));
     } finally {
-      setStackOpBusy(false);
+      setOfferBusy(false);
+    }
+  }
+
+  async function postRfq() {
+    if (rfqBusy) return;
+    if (!stackGate.ok) return void stackBlockedToast('Post RFQ');
+
+    const channel = rfqChannel.trim() || scChannels.split(',')[0]?.trim() || '';
+    if (!channel) return void pushToast('error', 'RFQ channel is required');
+
+    const trade_id = rfqTradeId.trim() || `rfq-${Date.now()}`;
+    if (!trade_id) return void pushToast('error', 'trade_id is required');
+
+    if (!Number.isInteger(rfqBtcSats) || rfqBtcSats < 1) return void pushToast('error', 'BTC amount must be >= 1 sat');
+    if (!/^[0-9]+$/.test(String(rfqUsdtAtomic || '').trim())) return void pushToast('error', 'USDT amount must be a base-unit integer');
+
+    if (rfqMaxPlatformFeeBps + rfqMaxTradeFeeBps > rfqMaxTotalFeeBps) {
+      return void pushToast('error', 'Fee caps invalid: total must be >= platform + trade');
+    }
+    if (rfqMinSolRefundWindowSec > rfqMaxSolRefundWindowSec) {
+      return void pushToast('error', 'Solana refund window invalid: min must be <= max');
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (!Number.isInteger(rfqValidUntilUnix) || rfqValidUntilUnix <= nowSec) {
+      return void pushToast('error', 'Expiry must be in the future');
+    }
+
+    if (toolRequiresApproval('intercomswap_rfq_post') && !autoApprove) {
+      const ok = window.confirm(`Post RFQ now?\n\nchannel: ${channel}\ntrade_id: ${trade_id}\nBTC: ${rfqBtcSats} sats\nUSDT: ${rfqUsdtAtomic}`);
+      if (!ok) return;
+    }
+
+    setRfqBusy(true);
+    try {
+      const args = {
+        channel,
+        trade_id,
+        btc_sats: rfqBtcSats,
+        usdt_amount: String(rfqUsdtAtomic),
+        max_platform_fee_bps: rfqMaxPlatformFeeBps,
+        max_trade_fee_bps: rfqMaxTradeFeeBps,
+        max_total_fee_bps: rfqMaxTotalFeeBps,
+        min_sol_refund_window_sec: rfqMinSolRefundWindowSec,
+        max_sol_refund_window_sec: rfqMaxSolRefundWindowSec,
+        valid_until_unix: rfqValidUntilUnix,
+      };
+      const out = await runToolFinal('intercomswap_rfq_post', args, { auto_approve: true });
+      const cj = out?.content_json;
+      if (cj && typeof cj === 'object' && cj.type === 'error') throw new Error(String(cj.error || 'rfq_post failed'));
+      const id = String(cj?.rfq_id || '').trim();
+      pushToast('success', `RFQ posted${id ? ` (${id.slice(0, 12)}…)` : ''}`);
+      setRfqTradeId(`rfq-${Date.now()}`);
+    } catch (e: any) {
+      pushToast('error', e?.message || String(e));
+    } finally {
+      setRfqBusy(false);
     }
   }
 
@@ -719,26 +950,6 @@ function App() {
     }
   }
 
-  async function refreshPeersAndBots() {
-    setPeerStatusBusy(true);
-    try {
-      setPeerStatus(await runDirectToolOnce('intercomswap_peer_status', {}, { auto_approve: false }));
-    } catch (e: any) {
-      setPeerStatus({ type: 'error', error: e?.message || String(e) });
-    } finally {
-      setPeerStatusBusy(false);
-    }
-
-    setRfqbotStatusBusy(true);
-    try {
-      setRfqbotStatus(await runDirectToolOnce('intercomswap_rfqbot_status', {}, { auto_approve: false }));
-    } catch (e: any) {
-      setRfqbotStatus({ type: 'error', error: e?.message || String(e) });
-    } finally {
-      setRfqbotStatusBusy(false);
-    }
-  }
-
   async function loadTradesPage({ reset = false } = {}) {
     if (tradesLoading) return;
     setTradesLoading(true);
@@ -855,11 +1066,25 @@ function App() {
         dbId = await promptAdd({ ts, session_id: sid, type, evt: normalized });
       } catch (_e) {}
     }
+
+    const el = promptListRef.current;
+    const prevHeight = el ? el.scrollHeight : 0;
+    const prevTop = el ? el.scrollTop : 0;
+    const keepViewport = Boolean(el && prevTop > 80);
+
     setPromptEvents((prev) => {
-      const next = prev.concat([{ ...normalized, db_id: dbId }]);
+      const next = [{ ...normalized, db_id: dbId }].concat(prev);
       if (next.length <= promptEventsMax) return next;
-      return next.slice(next.length - promptEventsMax);
+      return next.slice(0, promptEventsMax);
     });
+    if (keepViewport) {
+      requestAnimationFrame(() => {
+        const el2 = promptListRef.current;
+        if (!el2) return;
+        const delta = el2.scrollHeight - prevHeight;
+        if (delta > 0) el2.scrollTop = prevTop + delta;
+      });
+    }
   }
 
   async function appendScEvent(evt: any, { persist = true } = {}) {
@@ -877,21 +1102,36 @@ function App() {
         dbId = await scAdd({ ts, channel, kind, trade_id, seq, evt: normalized });
       } catch (_e) {}
     }
+
+    const el = scListRef.current;
+    const prevHeight = el ? el.scrollHeight : 0;
+    const prevTop = el ? el.scrollTop : 0;
+    const keepViewport = Boolean(el && prevTop > 80);
+
     setScEvents((prev) => {
-      const next = prev.concat([{ ...normalized, db_id: dbId }]);
+      const next = [{ ...normalized, db_id: dbId }].concat(prev);
       if (next.length <= scEventsMax) return next;
-      return next.slice(next.length - scEventsMax);
+      return next.slice(0, scEventsMax);
     });
+    if (keepViewport) {
+      requestAnimationFrame(() => {
+        const el2 = scListRef.current;
+        if (!el2) return;
+        const delta = el2.scrollHeight - prevHeight;
+        if (delta > 0) el2.scrollTop = prevTop + delta;
+      });
+    }
   }
 
-  async function copyToClipboard(label: string, value: any) {
-    const s = String(value ?? '').trim();
-    if (!s) return;
-    try {
-      await navigator.clipboard.writeText(s);
-      void appendPromptEvent({ type: 'ui', ts: Date.now(), message: `copied ${label}` }, { persist: false });
-    } catch (_e) {}
-  }
+	  async function copyToClipboard(label: string, value: any) {
+	    const s = String(value ?? '').trim();
+	    if (!s) return;
+	    try {
+	      await navigator.clipboard.writeText(s);
+	      pushToast('success', `Copied ${label}`);
+	      void appendPromptEvent({ type: 'ui', ts: Date.now(), message: `copied ${label}` }, { persist: false });
+	    } catch (_e) {}
+	  }
 
   function deriveKindTrade(msg: any) {
     if (!msg || typeof msg !== 'object') return { kind: '', trade_id: '' };
@@ -900,94 +1140,152 @@ function App() {
     return { kind, trade_id };
   }
 
-	async function startScStream() {
-		if (scAbortRef.current) scAbortRef.current.abort();
-		const ac = new AbortController();
-		scAbortRef.current = ac;
-		let sawOpen = false;
-		let hadError = false;
+		async function startScStream() {
+	    // Mark the stream as wanted. This is the default; STOP stack will disable it.
+	    scStreamWantedRef.current = true;
 
-		const channels = scChannels
-			.split(',')
-			.map((s) => s.trim())
-			.filter(Boolean)
-      .slice(0, 50);
-    const url = new URL('/v1/sc/stream', window.location.origin);
-    if (channels.length > 0) url.searchParams.set('channels', channels.join(','));
-    url.searchParams.set('backlog', '250');
+	    // Bump generation so stale async finally/catch blocks cannot clobber the latest stream state.
+	    scStreamGenRef.current += 1;
+	    const gen = scStreamGenRef.current;
 
-    setScConnected(true);
-    setScStreamErr(null);
-    await appendScEvent({ type: 'ui', ts: Date.now(), message: `sc/stream connecting (${channels.length || 'all'})...` }, { persist: false });
+			if (scAbortRef.current) scAbortRef.current.abort();
+			const ac = new AbortController();
+			scAbortRef.current = ac;
 
-		try {
-			const res = await fetch(url.toString(), { method: 'GET', signal: ac.signal });
-			if (!res.ok || !res.body) throw new Error(`sc/stream failed: ${res.status}`);
-			const reader = res.body.getReader();
-			const td = new TextDecoder();
-			let buf = '';
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				buf += td.decode(value, { stream: true });
-				while (true) {
-					const idx = buf.indexOf('\n');
-					if (idx < 0) break;
-					const line = buf.slice(0, idx).trim();
-					buf = buf.slice(idx + 1);
-					if (!line) continue;
-					let obj: any = null;
-					try {
-						obj = JSON.parse(line);
-					} catch (_e) {
-						await appendScEvent({ type: 'parse_error', ts: Date.now(), line }, { persist: false });
-						continue;
-					}
-						if (obj.type === 'sc_stream_open') sawOpen = true;
-            // Heartbeats are transport-level keepalives; don’t pollute the operator log.
-            if (obj.type === 'heartbeat') continue;
-						if (obj.type === 'sc_event') {
-							const msg = obj.message;
-							const d = deriveKindTrade(msg);
-							await appendScEvent({ ...obj, ...d }, { persist: true });
-					} else if (obj.type === 'error') {
-						const errMsg = String(obj?.error || 'sc/stream error');
-						hadError = true;
-						setScStreamErr(errMsg);
-						await appendScEvent(obj, { persist: false });
-					} else {
-						await appendScEvent(obj, { persist: false });
-					}
-				}
-			}
-		} catch (err: any) {
-			hadError = true;
-			const msg = err?.message || String(err);
-			setScStreamErr(msg);
-			await appendScEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
-		} finally {
-			// If the stream ends without an explicit error (eg, peer not running / SC-Bridge unreachable),
-			// surface that as a visible error so operators aren’t left guessing.
-			if (!ac.signal.aborted && !hadError && !sawOpen) {
-				const msg = 'sc/stream ended before open (peer/SC-Bridge not ready?)';
-				setScStreamErr(msg);
-				await appendScEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
-			}
-			setScConnected(false);
+			const channels = scChannels
+				.split(',')
+				.map((s) => s.trim())
+				.filter(Boolean)
+	      .slice(0, 50);
+	    const url = new URL('/v1/sc/stream', window.location.origin);
+	    if (channels.length > 0) url.searchParams.set('channels', channels.join(','));
+	    url.searchParams.set('backlog', '250');
+
+	    setScConnecting(true);
+	    setScConnected(false);
+	    setScStreamErr(null);
+	    await appendScEvent(
+	      { type: 'ui', ts: Date.now(), message: `sc/stream connecting (${channels.length || 'all'})...` },
+	      { persist: false }
+	    );
+
+	    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+	    const isAbortLike = (err: any, msg: string) => {
+	      if (ac.signal.aborted) return true;
+	      if (err && typeof err === 'object') {
+	        if (String((err as any).name || '') === 'AbortError') return true;
+	      }
+	      if (/client_closed/i.test(msg)) return true;
+	      return false;
+	    };
+
+	    // Auto-reconnect loop: the feed is required for a safe human UX.
+	    let backoffMs = 450;
+	    while (!ac.signal.aborted && scStreamWantedRef.current && scStreamGenRef.current === gen) {
+	      let sawOpen = false;
+	      try {
+	        const res = await fetch(url.toString(), { method: 'GET', signal: ac.signal });
+	        if (!res.ok || !res.body) throw new Error(`sc/stream failed: ${res.status}`);
+
+	        const reader = res.body.getReader();
+	        const td = new TextDecoder();
+	        let buf = '';
+
+	        while (true) {
+	          const { done, value } = await reader.read();
+	          if (done) break;
+	          buf += td.decode(value, { stream: true });
+	          while (true) {
+	            const idx = buf.indexOf('\n');
+	            if (idx < 0) break;
+	            const line = buf.slice(0, idx).trim();
+	            buf = buf.slice(idx + 1);
+	            if (!line) continue;
+	            let obj: any = null;
+	            try {
+	              obj = JSON.parse(line);
+	            } catch (_e) {
+	              await appendScEvent({ type: 'parse_error', ts: Date.now(), line }, { persist: false });
+	              continue;
+	            }
+
+	            if (obj.type === 'sc_stream_open') {
+	              sawOpen = true;
+	              if (scStreamGenRef.current === gen) {
+	                setScConnected(true);
+	                setScConnecting(false);
+	                setScStreamErr(null);
+	              }
+	              continue;
+	            }
+
+	            // Heartbeats are transport-level keepalives; don’t pollute the operator log.
+	            if (obj.type === 'heartbeat') continue;
+
+	            if (obj.type === 'sc_event') {
+	              const msg = obj.message;
+	              const d = deriveKindTrade(msg);
+	              await appendScEvent({ ...obj, ...d }, { persist: true });
+	              continue;
+	            }
+
+	            if (obj.type === 'error') {
+	              // Server-side stream error. Treat as reconnect-worthy.
+	              throw new Error(String(obj?.error || 'sc/stream error'));
+	            }
+
+	            await appendScEvent(obj, { persist: false });
+	          }
+	        }
+	      } catch (err: any) {
+	        const msg = err?.message || String(err);
+	        if (isAbortLike(err, msg)) break;
+
+	        // Only update state if this is still the active stream.
+	        if (scStreamGenRef.current === gen) {
+	          setScConnected(false);
+	          setScConnecting(true);
+	          setScStreamErr(msg);
+	        }
+	        await appendScEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
+	      }
+
+	      // Stream ended (disconnect) without abort. Reconnect with backoff.
+	      if (ac.signal.aborted || !scStreamWantedRef.current || scStreamGenRef.current !== gen) break;
+
+	      const msg = sawOpen ? 'sc/stream disconnected (reconnecting...)' : 'sc/stream ended before open (reconnecting...)';
+	      if (scStreamGenRef.current === gen) {
+	        setScConnected(false);
+	        setScConnecting(true);
+	        setScStreamErr(msg);
+	      }
+	      await appendScEvent({ type: 'ui', ts: Date.now(), message: msg }, { persist: false });
+
+	      await sleep(backoffMs);
+	      backoffMs = Math.min(8000, Math.trunc(backoffMs * 1.6));
+	    }
+
+	    if (scStreamGenRef.current === gen) {
+	      setScConnecting(false);
+	      setScConnected(false);
+	    }
 		}
-	}
 
-  function stopScStream() {
-    if (scAbortRef.current) scAbortRef.current.abort();
-    scAbortRef.current = null;
-    setScConnected(false);
-    void appendScEvent({ type: 'ui', ts: Date.now(), message: 'sc/stream stopped' }, { persist: false });
-  }
+	  function stopScStream() {
+	    scStreamWantedRef.current = false;
+	    if (scAbortRef.current) scAbortRef.current.abort();
+	    scAbortRef.current = null;
+	    setScConnecting(false);
+	    setScConnected(false);
+	    setScStreamErr(null);
+	    void appendScEvent({ type: 'ui', ts: Date.now(), message: 'sc/stream stopped' }, { persist: false });
+	  }
 
-  async function runPromptStream(payload: any) {
-    // Hard gate: never allow trade/protocol actions unless the full stack is up.
-    // This prevents operators from broadcasting RFQs/offers or starting bots when settlement isn’t possible.
-    try {
+	  async function runPromptStream(payload: any) {
+	    // Hard gate: never allow trade/protocol actions unless the full stack is up.
+	    // This prevents operators from broadcasting RFQs/offers or starting bots when settlement isn’t possible.
+	    try {
       const promptStr = String(payload?.prompt || '').trim();
       let toolName: string | null = null;
       if (promptStr.startsWith('{')) {
@@ -1003,15 +1301,15 @@ function App() {
         (toolName && toolNeedsFullStack(toolName) && !stackGate.ok) ||
         (!toolName && runMode === 'llm' && !stackGate.ok);
 
-      if (block) {
-        const missing = stackGate.reasons.length > 0 ? stackGate.reasons.map((r) => `- ${r}`).join('\n') : '- unknown';
-        const msg = `${toolName || 'prompt'}: blocked (stack not ready)\n\nMissing:\n${missing}\n\nGo to Overview -> Getting Started and complete the checklist.`;
-        setRunErr(msg);
-        setConsoleEvents([{ type: 'error', ts: Date.now(), error: msg }]);
-        void appendPromptEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
-        return;
-      }
-    } catch (_e) {}
+	      if (block) {
+	        const missing = stackGate.reasons.length > 0 ? stackGate.reasons.map((r) => `- ${r}`).join('\n') : '- unknown';
+	        const msg = `${toolName || 'prompt'}: blocked (stack not ready)\n\nMissing:\n${missing}\n\nGo to Overview -> Getting Started and complete the checklist.`;
+	        setRunErr(msg);
+	        setConsoleEvents([{ type: 'error', ts: Date.now(), error: msg }]);
+	        void appendPromptEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
+	        return { type: 'blocked', error: msg };
+	      }
+	    } catch (_e) {}
 
     if (promptAbortRef.current) promptAbortRef.current.abort();
     const ac = new AbortController();
@@ -1023,14 +1321,15 @@ function App() {
 
     await appendPromptEvent({ type: 'ui', ts: Date.now(), message: 'run starting...' }, { persist: false });
 
-    try {
-      const res = await fetch('/v1/run/stream', {
-        method: 'POST',
-        signal: ac.signal,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok || !res.body) throw new Error(`run failed: ${res.status}`);
+	    let finalObj: any = null;
+	    try {
+	      const res = await fetch('/v1/run/stream', {
+	        method: 'POST',
+	        signal: ac.signal,
+	        headers: { 'content-type': 'application/json' },
+	        body: JSON.stringify(payload),
+	      });
+	      if (!res.ok || !res.body) throw new Error(`run failed: ${res.status}`);
 
       const reader = res.body.getReader();
       const td = new TextDecoder();
@@ -1046,40 +1345,43 @@ function App() {
           buf = buf.slice(idx + 1);
           if (!line) continue;
           let obj: any = null;
-          try {
-            obj = JSON.parse(line);
-          } catch (_e) {
-            await appendPromptEvent({ type: 'parse_error', ts: Date.now(), line }, { persist: false });
-            continue;
-          }
-          if (obj.type === 'run_start' && obj.session_id) setSessionId(String(obj.session_id));
-          if (obj.type === 'error') setRunErr(String(obj.error || 'error'));
-          if (obj.type === 'tool' && obj.result && typeof obj.result === 'object' && obj.result.type === 'error') {
-            const msg = String(obj?.result?.error || `${obj?.name || 'tool'} failed`);
-            setRunErr(msg);
-          }
-          if (obj.type === 'done') setRunBusy(false);
-          setConsoleEvents((prev) => {
-            const next = prev.concat([obj]);
-            if (next.length <= consoleEventsMax) return next;
-            return next.slice(next.length - consoleEventsMax);
-          });
-          await appendPromptEvent(obj, { persist: true });
-        }
-      }
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      setRunErr(msg);
-      setConsoleEvents((prev) => {
-        const next = prev.concat([{ type: 'error', ts: Date.now(), error: msg }]);
-        if (next.length <= consoleEventsMax) return next;
-        return next.slice(next.length - consoleEventsMax);
-      });
-      await appendPromptEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
-    } finally {
-      setRunBusy(false);
-    }
-  }
+	          try {
+	            obj = JSON.parse(line);
+	          } catch (_e) {
+	            await appendPromptEvent({ type: 'parse_error', ts: Date.now(), line }, { persist: false });
+	            continue;
+	          }
+	          if (obj.type === 'final') finalObj = obj;
+	          if (obj.type === 'run_start' && obj.session_id) setSessionId(String(obj.session_id));
+	          if (obj.type === 'error') setRunErr(String(obj.error || 'error'));
+	          if (obj.type === 'tool' && obj.result && typeof obj.result === 'object' && obj.result.type === 'error') {
+	            const msg = String(obj?.result?.error || `${obj?.name || 'tool'} failed`);
+	            setRunErr(msg);
+	          }
+		          if (obj.type === 'done') setRunBusy(false);
+		          setConsoleEvents((prev) => {
+		            const next = [obj].concat(prev);
+		            if (next.length <= consoleEventsMax) return next;
+		            return next.slice(0, consoleEventsMax);
+		          });
+		          await appendPromptEvent(obj, { persist: true });
+	        }
+	      }
+	      return finalObj;
+	    } catch (err: any) {
+	      const msg = err?.message || String(err);
+		      setRunErr(msg);
+		      setConsoleEvents((prev) => {
+		        const next = [{ type: 'error', ts: Date.now(), error: msg }].concat(prev);
+		        if (next.length <= consoleEventsMax) return next;
+		        return next.slice(0, consoleEventsMax);
+		      });
+	      await appendPromptEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
+	      return { type: 'error', error: msg };
+	    } finally {
+	      setRunBusy(false);
+	    }
+	  }
 
   async function onRun() {
     if (runMode === 'tool') {
@@ -1159,14 +1461,23 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Auto-connect the sidechannel feed once a peer is up. The UI relies on this for RFQ/Offer inboxes.
+  useEffect(() => {
+    const okPeer = Boolean(preflight?.peer_status?.peers?.some?.((p: any) => Boolean(p?.alive)));
+    if (!health?.ok || !okPeer) return;
+    if (!scStreamWantedRef.current) return;
+    if (scConnected || scConnecting) return;
+    void startScStream();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health?.ok, preflight?.peer_status, scChannels]);
+
   // Lazy load tab-specific data.
   useEffect(() => {
-    if (activeTab === 'swaps' && trades.length === 0) void loadTradesPage({ reset: true });
+    if (activeTab === 'trade_actions' && trades.length === 0) void loadTradesPage({ reset: true });
     if (activeTab === 'refunds' && (openRefunds.length === 0 || openClaims.length === 0)) {
       if (openRefunds.length === 0) void loadOpenRefundsPage({ reset: true });
       if (openClaims.length === 0) void loadOpenClaimsPage({ reset: true });
     }
-    if (activeTab === 'peers' && (!peerStatus || !rfqbotStatus)) void refreshPeersAndBots();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
@@ -1184,54 +1495,20 @@ function App() {
     })();
   }, []);
 
-  useEffect(() => {
-    if (!scFollowTail) return;
-    const el = scListRef.current;
-    if (!el) return;
-    // Scroll to bottom when new events append. Use rAF so virtualization has laid out.
-    requestAnimationFrame(() => {
-      try {
-        el.scrollTop = el.scrollHeight;
-      } catch (_e) {}
-    });
-  }, [scEvents, scFollowTail]);
-
-  useEffect(() => {
-    if (!promptFollowTail) return;
-    const el = promptListRef.current;
-    if (!el) return;
-    requestAnimationFrame(() => {
-      try {
-        el.scrollTop = el.scrollHeight;
-      } catch (_e) {}
-    });
-  }, [promptEvents, promptFollowTail]);
-
-  useEffect(() => {
-    if (!consoleFollowTail) return;
-    const el = consoleListRef.current;
-    if (!el) return;
-    requestAnimationFrame(() => {
-      try {
-        el.scrollTop = el.scrollHeight;
-      } catch (_e) {}
-    });
-  }, [consoleEvents, consoleFollowTail]);
+  // No “follow tail” UI: logs render newest-first.
 
   const onScScroll = () => {
     const cur = scListRef.current;
     if (!cur) return;
-    const atBottom = cur.scrollHeight - cur.scrollTop - cur.clientHeight < 120;
-    if (!atBottom && scFollowTailRef.current) setScFollowTail(false);
-    if (cur.scrollTop < 140) void loadOlderScEvents({ limit: 250 });
+    const nearBottom = cur.scrollHeight - cur.scrollTop - cur.clientHeight < 180;
+    if (nearBottom) void loadOlderScEvents({ limit: 250 });
   };
 
   const onPromptScroll = () => {
     const cur = promptListRef.current;
     if (!cur) return;
-    const atBottom = cur.scrollHeight - cur.scrollTop - cur.clientHeight < 120;
-    if (!atBottom && promptFollowTailRef.current) setPromptFollowTail(false);
-    if (cur.scrollTop < 140) void loadOlderPromptEvents({ limit: 250 });
+    const nearBottom = cur.scrollHeight - cur.scrollTop - cur.clientHeight < 180;
+    if (nearBottom) void loadOlderPromptEvents({ limit: 250 });
   };
 
   const onTradesScroll = () => {
@@ -1261,215 +1538,109 @@ function App() {
   const lnNodeIdShort = lnNodeId ? `${lnNodeId.slice(0, 16)}…` : '';
   const solSignerPubkey = String(preflight?.sol_signer?.pubkey || '').trim();
 
-  return (
-    <div
-      className={`shell ${promptOpen ? 'prompt-open' : 'prompt-closed'} ${navOpen ? 'nav-open' : 'nav-closed'} ${
-        inspectorOpen ? 'inspector-open' : 'inspector-closed'
-      }`}
-    >
-      <header className="topbar">
-        <div className="topbar-left">
-          <button className="iconbtn" onClick={() => setNavOpen((v) => !v)} aria-label="Toggle navigation">
-            ☰
-          </button>
-          <div className="logo">
-            <AnimatedLogo text="Collin" tagline="control center" />
-          </div>
-        </div>
-        <div className="topbar-mid">
-          <div className="statusline">
-            <StatusPill
-              label="env"
-              state={
-                envInfo?.env_kind === 'test'
-                  ? 'ok'
-                  : envInfo?.env_kind === 'mainnet'
-                    ? 'bad'
-                    : envInfo?.env_kind === 'mixed'
-                      ? 'neutral'
-                      : 'idle'
-              }
-              value={
-                envInfo?.env_kind
-                  ? String(envInfo.env_kind).toUpperCase()
-                  : envErr
-                    ? 'ERR'
-                    : 'UNKNOWN'
-              }
-            />
-            <StatusPill label="promptd" state={health?.ok ? 'ok' : 'bad'} />
-            <StatusPill label="sc/stream" state={scConnected ? 'ok' : scStreamErr ? 'bad' : 'idle'} value={scStreamErr ? 'ERR' : ''} />
-            <StatusPill
-              label="stack"
-              state={!health?.ok ? 'bad' : !preflight ? 'idle' : stackGate.ok ? 'ok' : 'bad'}
-              value={!preflight ? 'CHECK' : stackGate.ok ? 'READY' : 'BLOCK'}
-            />
-            <StatusPill label="run" state={runBusy ? 'neutral' : runErr ? 'bad' : 'idle'} value={runBusy ? 'RUNNING' : runErr ? 'ERR' : ''} />
-            <StatusPill label="mode" state="neutral" value={runMode.toUpperCase()} />
-            <span className="muted small">{health ? new Date(health.ts).toLocaleTimeString() : '...'}</span>
-          </div>
-          <div className="quick">
-            <button className="btn" onClick={refreshTools}>
-              Reload tools
-            </button>
-            <button className="btn" onClick={() => setInspectorOpen((v) => !v)}>
-              {inspectorOpen ? 'Hide' : 'Show'} inspector
-            </button>
-          </div>
-        </div>
-        <div className="topbar-right">
-          <button
-            className={`btn ${stackAnyRunning ? 'danger' : 'primary'}`}
-            onClick={stackAnyRunning ? stackStop : stackStart}
-            disabled={!health?.ok || stackOpBusy}
-            title={stackAnyRunning ? 'Stop peer + LN + Solana (local)' : 'Start peer + LN + Solana (bootstrap)'}
-          >
-            {stackOpBusy ? 'Busy…' : stackAnyRunning ? 'STOP' : 'START'}
-          </button>
-          <button className="btn primary" onClick={() => setPromptOpen((v) => !v)}>
-            {promptOpen ? 'Collapse' : 'Open'} console
-          </button>
-        </div>
-      </header>
+	  return (
+	    <div
+	      className={`shell ${navOpen ? 'nav-open' : 'nav-closed'}`}
+	    >
+	      <header className="topbar">
+	        <div className="topbar-left">
+	          <button className="iconbtn" onClick={() => setNavOpen((v) => !v)} aria-label="Toggle navigation">
+	            ☰
+	          </button>
+	          <div className="logo">
+	            <AnimatedLogo text="Collin" tagline="control center" />
+	          </div>
+	        </div>
+	        <div className="topbar-right">
+	          <button
+	            className={`btn ${stackAnyRunning ? 'danger' : 'primary'}`}
+	            onClick={stackAnyRunning ? stackStop : stackStart}
+	            disabled={!health?.ok || stackOpBusy}
+	            title={stackAnyRunning ? 'Stop peer + LN + Solana (local)' : 'Start peer + LN + Solana (bootstrap)'}
+	          >
+	            {stackOpBusy ? 'Busy…' : stackAnyRunning ? 'STOP' : 'START'}
+	          </button>
+	        </div>
+	      </header>
 
-      {navOpen ? (
-        <aside className="nav">
-          <nav className="nav-inner">
-            <NavButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} label="Overview" />
-            <NavButton
-              active={activeTab === 'rendezvous'}
-              onClick={() => setActiveTab('rendezvous')}
-              label="Rendezvous"
-            />
-            <NavButton active={activeTab === 'offers'} onClick={() => setActiveTab('offers')} label="Offers" badge={offerEvents.length} />
-            <NavButton active={activeTab === 'rfqs'} onClick={() => setActiveTab('rfqs')} label="RFQs" badge={rfqEvents.length} />
-            <NavButton
-              active={activeTab === 'invites'}
-              onClick={() => setActiveTab('invites')}
-              label="Invites"
-              badge={inviteEvents.length}
-            />
-            <NavButton active={activeTab === 'swaps'} onClick={() => setActiveTab('swaps')} label="Swaps" />
-            <NavButton active={activeTab === 'refunds'} onClick={() => setActiveTab('refunds')} label="Refunds" />
-            <NavButton active={activeTab === 'wallets'} onClick={() => setActiveTab('wallets')} label="Wallets" />
-            <NavButton active={activeTab === 'peers'} onClick={() => setActiveTab('peers')} label="Peers" />
-            <NavButton active={activeTab === 'audit'} onClick={() => setActiveTab('audit')} label="Audit" />
-            <NavButton active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} label="Settings" />
-          </nav>
-        </aside>
-      ) : null}
+	      {navOpen ? (
+	        <aside className="nav">
+	          <nav className="nav-inner">
+	            <NavButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} label="Overview" />
+	            <NavButton active={activeTab === 'prompt'} onClick={() => setActiveTab('prompt')} label="Prompt" />
+	            <NavButton
+	              active={activeTab === 'sell_usdt'}
+	              onClick={() => setActiveTab('sell_usdt')}
+	              label="Sell USDT"
+	              badge={myOfferPosts.length}
+	            />
+	            <NavButton
+	              active={activeTab === 'sell_btc'}
+	              onClick={() => setActiveTab('sell_btc')}
+	              label="Sell BTC"
+	              badge={myRfqPosts.length}
+	            />
+	            <NavButton
+	              active={activeTab === 'invites'}
+	              onClick={() => setActiveTab('invites')}
+	              label="Invites"
+	              badge={inviteEvents.length}
+	            />
+	            <NavButton active={activeTab === 'trade_actions'} onClick={() => setActiveTab('trade_actions')} label="Trade Actions" />
+	            <NavButton active={activeTab === 'refunds'} onClick={() => setActiveTab('refunds')} label="Refunds" />
+	            <NavButton active={activeTab === 'wallets'} onClick={() => setActiveTab('wallets')} label="Wallets" />
+	            <NavButton active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} label="Settings" />
+	            <NavButton active={activeTab === 'console'} onClick={() => setActiveTab('console')} label="Console" />
+	          </nav>
+	        </aside>
+	      ) : null}
 
       <main className="main">
         {activeTab === 'overview' ? (
           <div className="grid2">
-            <Panel title="Stack">
+            <Panel title="Getting Started">
               <div className="alert warn">
-                Use <b>START</b> in the header to bring up everything needed to quote and settle swaps:
-                <span className="mono"> peer + sc/stream + Lightning + Solana + receipts</span>.
+                Use <b>START</b> in the header. It bootstraps the full local stack: peer + sidechannels + Lightning + Solana + receipts.
               </div>
 
               <div className="row">
                 <button className="btn primary" onClick={refreshPreflight} disabled={preflightBusy}>
                   {preflightBusy ? 'Checking…' : 'Refresh status'}
                 </button>
-                {preflight?.ts ? <span className="muted small">last: {new Date(preflight.ts).toLocaleTimeString()}</span> : null}
                 <button className="btn" onClick={() => setActiveTab('wallets')}>
                   Wallets
                 </button>
-                <button className="btn" onClick={() => setActiveTab('rendezvous')}>
-                  Rendezvous
-                </button>
-              </div>
-
-              <div className="field">
-                <div className="field-hd">
-                  <span className="mono">Environment</span>
-                  {envInfo?.env_kind === 'test' ? (
-                    <span className="chip hi">TEST</span>
-                  ) : envInfo?.env_kind === 'mainnet' ? (
-                    <span className="chip danger">MAINNET</span>
-                  ) : envInfo?.env_kind === 'mixed' ? (
-                    <span className="chip warn">MIXED</span>
-                  ) : (
-                    <span className="chip">UNKNOWN</span>
-                  )}
-                </div>
-                <div className="muted small">
-                  LN: <span className="mono">{String(envInfo?.ln?.impl || '—')}</span> /{' '}
-                  <span className="mono">{String(envInfo?.ln?.network || '—')}</span> · Solana:{' '}
-                  <span className="mono">{String(envInfo?.solana?.classify?.kind || '—')}</span>
-                </div>
-                <div className="muted small">
-                  Solana RPC:{' '}
-                  <span className="mono">{String(Array.isArray(envInfo?.solana?.rpc_urls) ? envInfo.solana.rpc_urls[0] : '—')}</span>
-                </div>
-                <div className="muted small">
-                  receipts.db: <span className="mono">{String(envInfo?.receipts?.db || '—')}</span>
-                </div>
-                <div className="muted small">
-                  peer.keypair:{' '}
-                  <span className="mono">{String(envInfo?.peer?.keypair || '—')}</span>{' '}
-                  {envInfo?.peer?.exists === false ? <span className="chip warn">missing</span> : null}
-                </div>
-                <div className="muted small">
-                  Tip: keep test and mainnet as separate instances (different promptd ports + different receipts DB paths).
-                </div>
-                {envErr ? <div className="alert bad">{String(envErr)}</div> : null}
-                <div className="row">
-                  <button className="btn" onClick={refreshEnv} disabled={envBusy}>
-                    {envBusy ? 'Refreshing…' : 'Refresh env'}
-                  </button>
-                </div>
               </div>
 
               {!stackGate.ok ? (
                 <div className="alert bad">
-                  <b>STACK BLOCKED.</b> START/STOP will still run, but trade tools are blocked until these are green:
+                  <b>STACK BLOCKED.</b> Trading tools are disabled until everything is green:
                   <div className="muted small" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
                     {stackGate.reasons.length > 0 ? stackGate.reasons.map((r) => `- ${r}`).join('\n') : '- unknown'}
                   </div>
                 </div>
               ) : (
-                <div className="muted small">
-                  <span className="chip hi">stack ready</span> RFQ/Offer/Bot tools are unlocked.
+                <div className="alert">
+                  <span className="chip hi">READY</span> You can post Offers (Sell USDT) and RFQs (Sell BTC).
                 </div>
               )}
 
               <div className="field">
                 <div className="field-hd">
                   <span className="mono">Rendezvous Channels</span>
-                  {scConnected ? <span className="chip hi">stream on</span> : <span className="chip">stream off</span>}
                 </div>
-                <div className="muted small">
-                  Comma-separated channels for discovery/negotiation. START joins these on the peer and auto-connects{' '}
-                  <span className="mono">sc/stream</span>.
-                </div>
-                <div className="row">
-                  <input className="input" value={scChannels} onChange={(e) => setScChannels(e.target.value)} placeholder="channels (csv)" />
-                </div>
-                {scStreamErr ? <div className="alert bad">sc/stream: {String(scStreamErr)}</div> : null}
+                <input
+                  className="input mono"
+                  value={scChannels}
+                  onChange={(e) => setScChannels(e.target.value)}
+                  placeholder="0000intercomswapbtcusdt"
+                />
               </div>
 
               <div className="field">
                 <div className="field-hd">
-                  <span className="mono">Funding + Channel Status</span>
+                  <span className="mono">Funding</span>
                 </div>
-
-                <div className="muted small">
-                  You do <b>not</b> select an LN channel per trade. LN routing uses whatever channels your node has.
-                </div>
-
-                <div className="row">
-                  {preflight?.ln_summary?.channels > 0 ? (
-                    <span className="chip hi">{preflight.ln_summary.channels} LN channel(s)</span>
-                  ) : (
-                    <span className="chip warn">no LN channels</span>
-                  )}
-                  {String(envInfo?.ln?.backend || '') === 'docker' && String(envInfo?.ln?.network || '') === 'regtest' ? (
-                    <span className="chip hi">regtest auto-bootstrapped</span>
-                  ) : null}
-                </div>
-
                 <div className="row">
                   <span className="tag">BTC</span>
                   <input className="input mono" value={lnFundingAddr || ''} readOnly placeholder="Generate a BTC funding address…" />
@@ -1517,54 +1688,45 @@ function App() {
                   >
                     Refresh SOL
                   </button>
-                  {solBalance !== null && solBalance !== undefined ? (
-                    <span className="chip">{String(solBalance)} lamports</span>
-                  ) : null}
+                  {solBalance !== null && solBalance !== undefined ? <span className="chip">{String(solBalance)} lamports</span> : null}
                 </div>
                 {solBalanceErr ? <div className="alert bad">{solBalanceErr}</div> : null}
               </div>
 
               <div className="field">
                 <div className="field-hd">
-                  <span className="mono">App binding</span>
-                  {preflight?.app?.app_hash ? <span className="chip hi">bound</span> : <span className="chip">unknown</span>}
+                  <span className="mono">Lightning Channel</span>
                 </div>
-                <div className="muted small">
-                  RFQs/quotes include an <span className="mono">app_hash</span> so forks using different programs/tickers don’t mix in the same channels.
+                <div className="row">
+                  {preflight?.ln_summary?.channels > 0 ? (
+                    <span className="chip hi">{preflight.ln_summary.channels} channel(s)</span>
+                  ) : (
+                    <span className="chip warn">no channels</span>
+                  )}
+                  <button className="btn" onClick={() => setActiveTab('wallets')}>
+                    Open channel…
+                  </button>
                 </div>
-                {preflight?.app_error ? <div className="alert bad">{String(preflight.app_error)}</div> : null}
-                {preflight?.app?.app_hash ? (
-                  <div className="muted small">
-                  app_hash: <span className="mono">{String(preflight.app.app_hash).slice(0, 32)}…</span>
-                </div>
-                ) : null}
               </div>
             </Panel>
 
-            <Panel title="Live Stream (virtualized)">
+	            <Panel title="Live Feed">
+	              <div className="row">
+	                <input
+	                  className="input"
+	                  value={scChannels}
+	                  onChange={(e) => setScChannels(e.target.value)}
+	                  placeholder="channels (csv)"
+	                />
+	                <span className={`chip ${scConnected ? 'hi' : scConnecting ? 'warn' : ''}`}>
+	                  {scConnected ? 'connected' : scConnecting ? 'connecting' : 'stopped'}
+	                </span>
+	                <button className="btn primary" onClick={startScStream} disabled={!health?.ok || stackOpBusy}>
+	                  {scConnected || scConnecting ? 'Reconnect' : 'Connect'}
+	                </button>
+	              </div>
+	              {scStreamErr ? <div className="alert bad">sc/stream: {scStreamErr}</div> : null}
               <div className="row">
-                <input
-                  className="input"
-                  value={scChannels}
-                  onChange={(e) => setScChannels(e.target.value)}
-                  placeholder="channels (csv)"
-                />
-                {!scConnected ? (
-                  <button className="btn primary" onClick={startScStream}>
-                    Connect
-                  </button>
-                ) : (
-                  <button className="btn" onClick={stopScStream}>
-                    Stop
-                  </button>
-                )}
-              </div>
-              {scStreamErr ? <div className="alert bad">sc/stream: {scStreamErr}</div> : null}
-              <div className="row">
-                <label className="check">
-                  <input type="checkbox" checked={scFollowTail} onChange={(e) => setScFollowTail(e.target.checked)} />
-                  follow tail
-                </label>
                 <input
                   className="input"
                   value={scFilter.channel}
@@ -1596,261 +1758,436 @@ function App() {
           </div>
         ) : null}
 
-        {activeTab === 'rendezvous' ? (
+        {activeTab === 'prompt' ? (
           <div className="grid2">
-            <Panel title="Join / Subscribe">
-              <p className="muted">
-                This UI uses Intercom’s invite system as-is. Joining rendezvous channels is public; swap channels can be
-                invite-only.
-              </p>
+            <Panel title="Prompt">
+              <div className="alert warn">
+                LLM prompting is optional. Avoid pasting untrusted peer content. Prefer the structured UI (Sell USDT / Sell BTC / Invites / Wallets).
+              </div>
+              <textarea
+                className="textarea"
+                value={promptInput}
+                onChange={(e) => setPromptInput(e.target.value)}
+                placeholder="Ask Collin to run actions using tools..."
+              />
               <div className="row">
+                <button
+                  className="btn primary"
+                  onClick={async () => {
+                    const text = promptInput.trim();
+                    if (!text) return;
+                    const userMsg = { id: `u-${Date.now()}-${Math.random().toString(16).slice(2)}`, role: 'user' as const, ts: Date.now(), text };
+                    setPromptChat((prev) => prev.concat([userMsg]));
+                    setPromptInput('');
+                    setRunMode('llm');
+                    setRunErr(null);
+                    setRunBusy(true);
+                    try {
+                      const out = await fetchJson('/v1/run', {
+                        method: 'POST',
+                        body: JSON.stringify({ prompt: text, session_id: sessionId, auto_approve: autoApprove, dry_run: false }),
+                      });
+                      if (out && typeof out === 'object' && out.session_id) setSessionId(String(out.session_id));
+                      const reply =
+                        out && typeof out === 'object' && out.content_json !== undefined
+                          ? typeof out.content_json === 'string'
+                            ? out.content_json
+                            : JSON.stringify(out.content_json, null, 2)
+                          : out && typeof out === 'object' && typeof out.content === 'string'
+                            ? out.content
+                            : JSON.stringify(out, null, 2);
+                      setPromptChat((prev) =>
+                        prev.concat([{ id: `a-${Date.now()}-${Math.random().toString(16).slice(2)}`, role: 'assistant' as const, ts: Date.now(), text: reply }])
+                      );
+                    } catch (e: any) {
+                      const msg = e?.message || String(e);
+                      pushToast('error', msg);
+                      setPromptChat((prev) =>
+                        prev.concat([{ id: `a-${Date.now()}-${Math.random().toString(16).slice(2)}`, role: 'assistant' as const, ts: Date.now(), text: `Error: ${msg}` }])
+                      );
+                    } finally {
+                      setRunBusy(false);
+                    }
+                  }}
+                  disabled={runBusy || !health?.ok}
+                >
+                  {runBusy ? 'Running…' : 'Run'}
+                </button>
+                <button className="btn" onClick={() => setPromptChat([])} disabled={runBusy}>
+                  Clear chat
+                </button>
+              </div>
+            </Panel>
+            <Panel title="Chat">
+              <VirtualList
+                listRef={promptChatListRef}
+                items={promptChat}
+                itemKey={(m) => String(m?.id || Math.random())}
+                estimatePx={84}
+                render={(m) => (
+                  <div className="rowitem">
+                    <div className="rowitem-top">
+                      <span className={`mono chip ${m.role === 'assistant' ? 'hi' : ''}`}>{m.role}</span>
+                      <span className="mono dim">{new Date(m.ts).toLocaleTimeString()}</span>
+                    </div>
+                    <div className="rowitem-mid">
+                      <span className="mono" style={{ whiteSpace: 'pre-wrap' }}>
+                        {String(m.text || '')}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              />
+            </Panel>
+          </div>
+        ) : null}
+
+        {activeTab === 'sell_usdt' ? (
+          <div className="grid2">
+            <Panel title="New Offer (Sell USDT)">
+              {!stackGate.ok ? (
+                <div className="alert bad">
+                  <b>STACK BLOCKED.</b> Offers/RFQs are disabled until everything is green.
+                  <div className="muted small" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
+                    {stackGate.reasons.length > 0 ? stackGate.reasons.map((r) => `- ${r}`).join('\n') : '- unknown'}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Offer Name</span>
+                </div>
+                <input className="input" value={offerName} onChange={(e) => setOfferName(e.target.value)} placeholder="maker:alice" />
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Rendezvous Channels</span>
+                </div>
                 <input
-                  className="input"
+                  className="input mono"
                   value={scChannels}
                   onChange={(e) => setScChannels(e.target.value)}
-                  placeholder="rendezvous channels (csv)"
+                  placeholder="0000intercomswapbtcusdt"
                 />
-                {!scConnected ? (
-                  <button className="btn primary" onClick={startScStream}>
-                    Connect stream
-                  </button>
-                ) : (
-                  <button className="btn" onClick={stopScStream}>
-                    Stop stream
-                  </button>
-                )}
+                <div className="muted small">Offers are broadcast here. BTC sellers post matching RFQs into the same channels.</div>
               </div>
-              {scStreamErr ? <div className="alert bad">sc/stream: {scStreamErr}</div> : null}
+
+                <div className="gridform">
+                  <div className="field">
+                    <div className="field-hd">
+                    <span className="mono">Receive BTC (Lightning)</span>
+                    </div>
+                    <BtcSatsField name="offer_btc" sats={offerBtcSats} onSats={(n) => setOfferBtcSats(n || 0)} />
+                  </div>
+                  <div className="field">
+                    <div className="field-hd">
+                    <span className="mono">Pay USDT (Solana)</span>
+                    </div>
+                    <UsdtAtomicField
+                      decimals={6}
+                      atomic={offerUsdtAtomic}
+                    onAtomic={(a) => setOfferUsdtAtomic(a || '')}
+                    placeholder="10"
+                  />
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Fee Caps</span>
+                </div>
+                <div className="gridform">
+                  <PctBpsField
+                    label="platform"
+                    maxBps={500}
+                    bps={offerMaxPlatformFeeBps}
+                    onBps={(n) => setOfferMaxPlatformFeeBps(n ?? 0)}
+                  />
+                  <PctBpsField
+                    label="trade"
+                    maxBps={1000}
+                    bps={offerMaxTradeFeeBps}
+                    onBps={(n) => setOfferMaxTradeFeeBps(n ?? 0)}
+                  />
+                  <PctBpsField
+                    label="total"
+                    maxBps={1500}
+                    bps={offerMaxTotalFeeBps}
+                    onBps={(n) => setOfferMaxTotalFeeBps(n ?? 0)}
+                  />
+                </div>
+                <div className="muted small">
+                  total must be &gt;= platform + trade.
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Solana Refund Window (Bounds)</span>
+                </div>
+                <div className="gridform">
+                  <div>
+                    <div className="muted small">min</div>
+                    <DurationSecField
+                      name="offer_minwin"
+                      sec={offerMinSolRefundWindowSec}
+                      onSec={(s: number | null) => setOfferMinSolRefundWindowSec(typeof s === 'number' ? s : 0)}
+                    />
+                  </div>
+                  <div>
+                    <div className="muted small">max</div>
+                    <DurationSecField
+                      name="offer_maxwin"
+                      sec={offerMaxSolRefundWindowSec}
+                      onSec={(s: number | null) => setOfferMaxSolRefundWindowSec(typeof s === 'number' ? s : 0)}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Expires</span>
+                </div>
+                <input
+                  className="input mono"
+                  type="datetime-local"
+                  value={unixSecToDateTimeLocal(offerValidUntilUnix)}
+                  onChange={(e) => {
+                    const sec = dateTimeLocalToUnixSec(e.target.value);
+                    if (sec !== null) setOfferValidUntilUnix(sec);
+                  }}
+                />
+                <div className="row">
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 72 * 3600)}
+                    disabled={offerBusy}
+                  >
+                    +72h
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 24 * 3600)}
+                    disabled={offerBusy}
+                  >
+                    +24h
+                  </button>
+                </div>
+              </div>
+
               <div className="row">
                 <button
-                  className="btn"
-                  onClick={() => {
-                    const chans = scChannels
-                      .split(',')
-                      .map((s) => s.trim())
-                      .filter(Boolean);
-                    if (chans.length === 0) return;
-                    setRunMode('tool');
-                    setToolName('intercomswap_sc_subscribe');
-                    setToolArgsBoth({ channels: chans });
-                    setPromptOpen(true);
-                  }}
+                  className="btn primary"
+                  onClick={postOffer}
+                  disabled={offerBusy || stackOpBusy || !health?.ok || !stackGate.ok}
                 >
-                  Prepare subscribe tool-call
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    const first = scChannels
-                      .split(',')
-                      .map((s) => s.trim())
-                      .filter(Boolean)[0];
-                    if (!first) return;
-                    setRunMode('tool');
-                    setToolName('intercomswap_sc_join');
-                    setToolArgsBoth({ channel: first });
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare join tool-call
+                  {offerBusy ? 'Posting…' : 'Post Offer'}
                 </button>
               </div>
             </Panel>
-            <Panel title="Recent Messages">
+
+            <Panel title="Offers">
               <VirtualList
-                listRef={scListRef}
-                items={filteredScEvents}
-                itemKey={(e) => String(e.db_id || e.seq || e.id || e.ts || Math.random())}
-                estimatePx={78}
-                onScroll={onScScroll}
-                render={(e) => (
-                  <EventRow
-                    evt={e}
-                    onSelect={() => setSelected({ type: 'sc_event', evt: e })}
-                    selected={selected?.type === 'sc_event' && selected?.evt?.seq === e.seq}
-                  />
-                )}
+                items={sellUsdtFeedItems}
+                itemKey={(it) => String(it.id || Math.random())}
+                estimatePx={92}
+                render={(it) =>
+                  it._t === 'header' ? (
+                    <div className="feedhdr">
+                      <span className="mono">{it.title}</span>
+                      <span className="mono dim">{typeof it.count === 'number' ? it.count : ''}</span>
+                    </div>
+                  ) : (
+                    <OfferRow
+                      evt={it.evt}
+                      badge={it.badge || ''}
+                      showRespond={false}
+                      onSelect={() => setSelected({ type: it.badge ? 'offer_posted' : 'offer', evt: it.evt })}
+                      onRespond={() => {}}
+                    />
+                  )
+                }
               />
             </Panel>
           </div>
         ) : null}
 
-        {activeTab === 'offers' ? (
+        {activeTab === 'sell_btc' ? (
           <div className="grid2">
-            <Panel title="Offer Inbox">
-              <p className="muted">
-                Offers are non-binding announcements (swap.svc_announce) that mirror RFQ fields, so BTC sellers can post matching RFQs with minimal back-and-forth.
-              </p>
-              <VirtualList
-                items={offerEvents}
-                itemKey={(e) => String(e.db_id || e.seq || e.ts || Math.random())}
-                estimatePx={100}
-                render={(e) => (
-                  <OfferRow
-                    evt={e}
-                    onSelect={() => setSelected({ type: 'offer', evt: e })}
-                    onRespond={() => {
-                      const body = e?.message?.body || {};
-                      const offers = Array.isArray(body?.offers) ? body.offers : [];
-                      const o = offers[0] && typeof offers[0] === 'object' ? offers[0] : {};
-                      const rfqChan = Array.isArray(body?.rfq_channels) && body.rfq_channels[0] ? String(body.rfq_channels[0]) : (scChannels.split(',')[0]?.trim() || '0000intercomswapbtcusdt');
-                      setRunMode('tool');
-                      setToolName('intercomswap_rfq_post');
-                      setToolArgsBoth({
-                        channel: rfqChan,
-                        trade_id: `rfq-${Date.now()}`,
-                        btc_sats: typeof o?.btc_sats === 'number' ? o.btc_sats : 10000,
-                        usdt_amount: typeof o?.usdt_amount === 'string' ? o.usdt_amount : '1000000',
-                        max_platform_fee_bps: typeof o?.max_platform_fee_bps === 'number' ? o.max_platform_fee_bps : 500,
-                        max_trade_fee_bps: typeof o?.max_trade_fee_bps === 'number' ? o.max_trade_fee_bps : 1000,
-                        max_total_fee_bps: typeof o?.max_total_fee_bps === 'number' ? o.max_total_fee_bps : 1500,
-                        min_sol_refund_window_sec: typeof o?.min_sol_refund_window_sec === 'number' ? o.min_sol_refund_window_sec : 72 * 3600,
-                        max_sol_refund_window_sec: typeof o?.max_sol_refund_window_sec === 'number' ? o.max_sol_refund_window_sec : 7 * 24 * 3600,
-                        valid_until_unix: Math.floor(Date.now() / 1000) + 600,
-                      });
-                      setPromptOpen(true);
-                    }}
-                  />
-                )}
-              />
-            </Panel>
-            <Panel title="My Offers (Posted Locally)">
-              <p className="muted small">
-                These offers were posted from this browser session (derived from prompt history). They may not appear in the inbox if no peers are connected.
-              </p>
-              <VirtualList
-                items={myOfferPosts}
-                itemKey={(e) => String(e.svc_announce_id || e.trade_id || e.ts || Math.random())}
-                estimatePx={100}
-                render={(e) => (
-                  <OfferRow
-                    evt={e}
-                    onSelect={() => setSelected({ type: 'offer_posted', evt: e })}
-                    onRespond={() => {}}
-                    showRespond={false}
-                    badge="outbox"
-                  />
-                )}
-              />
-            </Panel>
-            <Panel title="Prompt Console Shortcuts">
-              <button
-                className="btn primary"
-                onClick={() => {
-                  const chans = scChannels.split(',').map((s) => s.trim()).filter(Boolean);
-                  setRunMode('tool');
-                  setToolName('intercomswap_offer_post');
-                  setToolArgsBoth({
-                    channels: chans.length > 0 ? chans : ['0000intercomswapbtcusdt'],
-                    name: 'maker:offer',
-                    rfq_channels: chans.length > 0 ? chans : ['0000intercomswapbtcusdt'],
-                    ttl_sec: 300,
-                    offers: [
-                      {
-                        pair: 'BTC_LN/USDT_SOL',
-                        have: 'USDT_SOL',
-                        want: 'BTC_LN',
-                        btc_sats: 10000,
-                        usdt_amount: '1000000',
-                        max_platform_fee_bps: 500,
-                        max_trade_fee_bps: 1000,
-                        max_total_fee_bps: 1500,
-                        min_sol_refund_window_sec: 72 * 3600,
-                        max_sol_refund_window_sec: 7 * 24 * 3600,
-                      },
-                    ],
-                  });
-                  setPromptOpen(true);
-                }}
-              >
-                New Offer tool-call (buy BTC)
-              </button>
-              <p className="muted small">
-                Sellers can respond by posting an RFQ using the “Respond” button in the Offer inbox.
-              </p>
-            </Panel>
-          </div>
-        ) : null}
+            <Panel title="New RFQ (Sell BTC)">
+              {!stackGate.ok ? (
+                <div className="alert bad">
+                  <b>STACK BLOCKED.</b> Offers/RFQs are disabled until everything is green.
+                  <div className="muted small" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
+                    {stackGate.reasons.length > 0 ? stackGate.reasons.map((r) => `- ${r}`).join('\n') : '- unknown'}
+                  </div>
+                </div>
+              ) : null}
 
-        {activeTab === 'rfqs' ? (
-          <div className="grid2">
-            <Panel title="RFQ Inbox">
-              <p className="muted">
-                RFQ = Request For Quote. All actions below are structured tool-calls (safe by default).
-              </p>
-              <VirtualList
-                items={rfqEvents}
-                itemKey={(e) => String(e.db_id || e.seq || e.ts || Math.random())}
-                estimatePx={88}
-                render={(e) => (
-                  <RfqRow
-                    evt={e}
-                    onSelect={() => setSelected({ type: 'rfq', evt: e })}
-                    onQuote={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_quote_post_from_rfq');
-                      setToolArgsBoth({
-                        channel: e.channel,
-                        rfq_envelope: e.message,
-                        // Defaults (editable): 0.5% + 0.5% and 72h Solana refund window.
-                        platform_fee_bps: 50,
-                        trade_fee_bps: 50,
-                        trade_fee_collector: String(preflight?.sol_signer?.pubkey || '...'),
-                        sol_refund_window_sec: 72 * 3600,
-                        valid_for_sec: 60,
-                      });
-                      setPromptOpen(true);
-                    }}
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Channel</span>
+                </div>
+                <select className="select" value={rfqChannel} onChange={(e) => setRfqChannel(e.target.value)}>
+                  {knownChannels.length > 0 ? (
+                    knownChannels.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={scChannels.split(',')[0]?.trim() || '0000intercomswapbtcusdt'}>default</option>
+                  )}
+                </select>
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">trade_id</span>
+                </div>
+                <input className="input mono" value={rfqTradeId} onChange={(e) => setRfqTradeId(e.target.value)} placeholder="rfq-..." />
+              </div>
+
+                <div className="gridform">
+                  <div className="field">
+                    <div className="field-hd">
+                    <span className="mono">Pay BTC (Lightning)</span>
+                    </div>
+                    <BtcSatsField name="rfq_btc" sats={rfqBtcSats} onSats={(n) => setRfqBtcSats(n || 0)} />
+                  </div>
+                  <div className="field">
+                    <div className="field-hd">
+                    <span className="mono">Receive USDT (Solana)</span>
+                    </div>
+                    <UsdtAtomicField
+                      decimals={6}
+                      atomic={rfqUsdtAtomic}
+                    onAtomic={(a) => setRfqUsdtAtomic(a || '')}
+                    placeholder="10"
                   />
-                )}
-              />
-            </Panel>
-            <Panel title="My RFQs (Posted Locally)">
-              <p className="muted small">
-                These are RFQs you posted from this browser session (derived from prompt history). They may not appear in the inbox if no peers are connected.
-              </p>
-              <VirtualList
-                items={myRfqPosts}
-                itemKey={(e) => String(e.rfq_id || e.trade_id || e.ts || Math.random())}
-                estimatePx={88}
-                render={(e) => (
-                  <RfqRow
-                    evt={e}
-                    onSelect={() => setSelected({ type: 'rfq_posted', evt: e })}
-                    onQuote={() => {}}
-                    showQuote={false}
-                    badge="outbox"
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Fee Caps</span>
+                </div>
+                <div className="gridform">
+                  <PctBpsField
+                    label="platform"
+                    maxBps={500}
+                    bps={rfqMaxPlatformFeeBps}
+                    onBps={(n) => setRfqMaxPlatformFeeBps(n ?? 0)}
                   />
-                )}
-              />
+                  <PctBpsField
+                    label="trade"
+                    maxBps={1000}
+                    bps={rfqMaxTradeFeeBps}
+                    onBps={(n) => setRfqMaxTradeFeeBps(n ?? 0)}
+                  />
+                  <PctBpsField
+                    label="total"
+                    maxBps={1500}
+                    bps={rfqMaxTotalFeeBps}
+                    onBps={(n) => setRfqMaxTotalFeeBps(n ?? 0)}
+                  />
+                </div>
+                <div className="muted small">
+                  total must be &gt;= platform + trade.
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Solana Refund Window (Bounds)</span>
+                </div>
+                <div className="gridform">
+                  <div>
+                    <div className="muted small">min</div>
+                    <DurationSecField
+                      name="rfq_minwin"
+                      sec={rfqMinSolRefundWindowSec}
+                      onSec={(s: number | null) => setRfqMinSolRefundWindowSec(typeof s === 'number' ? s : 0)}
+                    />
+                  </div>
+                  <div>
+                    <div className="muted small">max</div>
+                    <DurationSecField
+                      name="rfq_maxwin"
+                      sec={rfqMaxSolRefundWindowSec}
+                      onSec={(s: number | null) => setRfqMaxSolRefundWindowSec(typeof s === 'number' ? s : 0)}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Expires</span>
+                </div>
+                <input
+                  className="input mono"
+                  type="datetime-local"
+                  value={unixSecToDateTimeLocal(rfqValidUntilUnix)}
+                  onChange={(e) => {
+                    const sec = dateTimeLocalToUnixSec(e.target.value);
+                    if (sec !== null) setRfqValidUntilUnix(sec);
+                  }}
+                />
+                <div className="row">
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 72 * 3600)}
+                    disabled={rfqBusy}
+                  >
+                    +72h
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 24 * 3600)}
+                    disabled={rfqBusy}
+                  >
+                    +24h
+                  </button>
+                </div>
+              </div>
+
+              <div className="row">
+                <button
+                  className="btn primary"
+                  onClick={postRfq}
+                  disabled={rfqBusy || stackOpBusy || !health?.ok || !stackGate.ok}
+                >
+                  {rfqBusy ? 'Posting…' : 'Post RFQ'}
+                </button>
+              </div>
             </Panel>
-            <Panel title="Prompt Console Shortcuts">
-              <button
-                className="btn primary"
-                onClick={() => {
-                  setRunMode('tool');
-                  setToolName('intercomswap_rfq_post');
-                  setToolArgsBoth({
-                    channel: scChannels.split(',')[0]?.trim() || '0000intercomswapbtcusdt',
-                    trade_id: `rfq-${Date.now()}`,
-                    btc_sats: 10000,
-                    usdt_amount: '1000000',
-                    // Defaults (editable): accept up to protocol caps; prefer a long Solana refund window.
-                    max_platform_fee_bps: 500,
-                    max_trade_fee_bps: 1000,
-                    max_total_fee_bps: 1500,
-                    min_sol_refund_window_sec: 72 * 3600,
-                    max_sol_refund_window_sec: 7 * 24 * 3600,
-                    valid_until_unix: Math.floor(Date.now() / 1000) + 600,
-                  });
-                  setPromptOpen(true);
-                }}
-              >
-                New RFQ tool-call
-              </button>
-              <p className="muted small">
-                Note: avoid free-form “have/want” text in prompts. Use the structured RFQ/QUOTE tools.
-              </p>
+
+            <Panel title="RFQs">
+              <VirtualList
+                items={sellBtcFeedItems}
+                itemKey={(it) => String(it.id || Math.random())}
+                estimatePx={92}
+                render={(it) =>
+                  it._t === 'header' ? (
+                    <div className="feedhdr">
+                      <span className="mono">{it.title}</span>
+                      <span className="mono dim">{typeof it.count === 'number' ? it.count : ''}</span>
+                    </div>
+                  ) : (
+                    <RfqRow
+                      evt={it.evt}
+                      badge={it.badge || ''}
+                      showQuote={false}
+                      onSelect={() => setSelected({ type: it.badge ? 'rfq_posted' : 'rfq', evt: it.evt })}
+                      onQuote={() => {}}
+                    />
+                  )
+                }
+              />
             </Panel>
           </div>
         ) : null}
@@ -1867,33 +2204,68 @@ function App() {
                     evt={e}
                     onSelect={() => setSelected({ type: 'invite', evt: e })}
                     onJoin={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_join_from_swap_invite');
-                      setToolArgsBoth({ swap_invite_envelope: e.message });
-                      setPromptOpen(true);
+                      if (toolRequiresApproval('intercomswap_join_from_swap_invite') && !autoApprove) {
+                        const ok = window.confirm('Join this swap channel now?');
+                        if (!ok) return;
+                      }
+                      void (async () => {
+                        try {
+                          await runToolFinal('intercomswap_join_from_swap_invite', { swap_invite_envelope: e.message }, { auto_approve: true });
+                          pushToast('success', 'Joined swap channel');
+                        } catch (err: any) {
+                          pushToast('error', err?.message || String(err));
+                        }
+                      })();
                     }}
                   />
                 )}
               />
             </Panel>
             <Panel title="Channel Hygiene">
-              <button
-                className="btn"
-                onClick={() => {
-                  setRunMode('tool');
-                  setToolName('intercomswap_sc_leave');
-                  setToolArgsBoth({ channel: 'swap:...' });
-                  setPromptOpen(true);
-                }}
-              >
-                Prepare leave tool-call
-              </button>
-              <p className="muted small">Leave channels after trade completion/timeout to keep memory bounded.</p>
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Leave Channel</span>
+                </div>
+                <input
+                  className="input mono"
+                  value={leaveChannel}
+                  onChange={(e) => setLeaveChannel(e.target.value)}
+                  placeholder="swap:..."
+                />
+                <div className="row">
+                  <button
+                    className="btn primary"
+                    disabled={leaveBusy || !leaveChannel.trim()}
+                    onClick={() => {
+                      const channel = leaveChannel.trim();
+                      if (!channel) return;
+                      setLeaveBusy(true);
+                      void (async () => {
+                        try {
+                          if (toolRequiresApproval('intercomswap_sc_leave') && !autoApprove) {
+                            const ok = window.confirm(`Leave channel?\n\n${channel}`);
+                            if (!ok) return;
+                          }
+                          await runToolFinal('intercomswap_sc_leave', { channel }, { auto_approve: true });
+                          pushToast('success', `Left ${channel}`);
+                          setLeaveChannel('');
+                        } catch (err: any) {
+                          pushToast('error', err?.message || String(err));
+                        } finally {
+                          setLeaveBusy(false);
+                        }
+                      })();
+                    }}
+                  >
+                    {leaveBusy ? 'Leaving…' : 'Leave'}
+                  </button>
+                </div>
+              </div>
             </Panel>
           </div>
         ) : null}
 
-        {activeTab === 'swaps' ? (
+        {activeTab === 'trade_actions' ? (
           <div className="grid2">
             <Panel title="Trade Receipts (local, paginated)">
               <p className="muted">
@@ -1912,17 +2284,6 @@ function App() {
                 >
                   {tradesLoading ? 'Loading…' : 'Refresh'}
                 </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_receipts_list');
-                    setToolArgsBoth({ limit: tradesLimit, offset: 0 });
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare receipts_list tool-call
-                </button>
                 {!tradesHasMore ? <span className="muted small">end</span> : null}
               </div>
 
@@ -1938,16 +2299,42 @@ function App() {
                     selected={selected?.type === 'trade' && selected?.trade?.trade_id === t?.trade_id}
                     onSelect={() => setSelected({ type: 'trade', trade: t })}
                     onRecoverClaim={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_swaprecover_claim');
-                      setToolArgsBoth({ trade_id: t.trade_id });
-                      setPromptOpen(true);
+                      if (!stackGate.ok) return void stackBlockedToast('Claim');
+                      const trade_id = String(t?.trade_id || '').trim();
+                      if (!trade_id) return;
+                      void (async () => {
+                        try {
+                          if (toolRequiresApproval('intercomswap_swaprecover_claim') && !autoApprove) {
+                            const ok = window.confirm(`Claim escrow now?\n\ntrade_id: ${trade_id}`);
+                            if (!ok) return;
+                          }
+                          await runToolFinal('intercomswap_swaprecover_claim', { trade_id }, { auto_approve: true });
+                          pushToast('success', `Claim submitted (${trade_id})`);
+                          void loadTradesPage({ reset: true });
+                          void loadOpenClaimsPage({ reset: true });
+                        } catch (err: any) {
+                          pushToast('error', err?.message || String(err));
+                        }
+                      })();
                     }}
                     onRecoverRefund={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_swaprecover_refund');
-                      setToolArgsBoth({ trade_id: t.trade_id });
-                      setPromptOpen(true);
+                      if (!stackGate.ok) return void stackBlockedToast('Refund');
+                      const trade_id = String(t?.trade_id || '').trim();
+                      if (!trade_id) return;
+                      void (async () => {
+                        try {
+                          if (toolRequiresApproval('intercomswap_swaprecover_refund') && !autoApprove) {
+                            const ok = window.confirm(`Refund escrow now?\n\ntrade_id: ${trade_id}`);
+                            if (!ok) return;
+                          }
+                          await runToolFinal('intercomswap_swaprecover_refund', { trade_id }, { auto_approve: true });
+                          pushToast('success', `Refund submitted (${trade_id})`);
+                          void loadTradesPage({ reset: true });
+                          void loadOpenRefundsPage({ reset: true });
+                        } catch (err: any) {
+                          pushToast('error', err?.message || String(err));
+                        }
+                      })();
                     }}
                   />
                 )}
@@ -1960,72 +2347,108 @@ function App() {
                   <div className="muted small">
                     trade_id: <span className="mono">{String(selected?.trade?.trade_id || '')}</span>
                   </div>
+                  <pre className="code">{JSON.stringify(selected?.trade || {}, null, 2)}</pre>
                   <div className="row">
                     <button
                       className="btn"
                       onClick={() => {
-                        setRunMode('tool');
-                        setToolName('intercomswap_receipts_show');
-                        setToolArgsBoth({ trade_id: selected.trade.trade_id });
-                        setPromptOpen(true);
+                        const ch = String(selected?.trade?.swap_channel || '').trim();
+                        if (!ch) return;
+                        void (async () => {
+                          try {
+                            if (toolRequiresApproval('intercomswap_sc_join') && !autoApprove) {
+                              const ok = window.confirm(`Join channel?\n\n${ch}`);
+                              if (!ok) return;
+                            }
+                            await runToolFinal('intercomswap_sc_join', { channel: ch }, { auto_approve: true });
+                            pushToast('success', `Joined ${ch}`);
+                          } catch (err: any) {
+                            pushToast('error', err?.message || String(err));
+                          }
+                        })();
                       }}
+                      disabled={!String(selected?.trade?.swap_channel || '').trim()}
                     >
-                      Prepare receipts_show
+                      Join swap channel
                     </button>
                     <button
                       className="btn"
                       onClick={() => {
                         const ch = String(selected?.trade?.swap_channel || '').trim();
                         if (!ch) return;
-                        setRunMode('tool');
-                        setToolName('intercomswap_sc_join');
-                        setToolArgsBoth({ channel: ch });
-                        setPromptOpen(true);
+                        void (async () => {
+                          try {
+                            if (toolRequiresApproval('intercomswap_sc_leave') && !autoApprove) {
+                              const ok = window.confirm(`Leave channel?\n\n${ch}`);
+                              if (!ok) return;
+                            }
+                            await runToolFinal('intercomswap_sc_leave', { channel: ch }, { auto_approve: true });
+                            pushToast('success', `Left ${ch}`);
+                          } catch (err: any) {
+                            pushToast('error', err?.message || String(err));
+                          }
+                        })();
                       }}
+                      disabled={!String(selected?.trade?.swap_channel || '').trim()}
                     >
-                      Prepare join swap_channel
+                      Leave swap channel
                     </button>
                     <button
                       className="btn"
                       onClick={() => {
-                        const ch = String(selected?.trade?.swap_channel || '').trim();
-                        if (!ch) return;
-                        setRunMode('tool');
-                        setToolName('intercomswap_sc_leave');
-                        setToolArgsBoth({ channel: ch });
-                        setPromptOpen(true);
+                        const trade_id = String(selected?.trade?.trade_id || '').trim();
+                        if (!trade_id) return;
+                        if (!stackGate.ok) return void stackBlockedToast('Claim');
+                        void (async () => {
+                          try {
+                            if (toolRequiresApproval('intercomswap_swaprecover_claim') && !autoApprove) {
+                              const ok = window.confirm(`Claim escrow now?\n\ntrade_id: ${trade_id}`);
+                              if (!ok) return;
+                            }
+                            await runToolFinal('intercomswap_swaprecover_claim', { trade_id }, { auto_approve: true });
+                            pushToast('success', `Claim submitted (${trade_id})`);
+                            void loadTradesPage({ reset: true });
+                            void loadOpenClaimsPage({ reset: true });
+                          } catch (err: any) {
+                            pushToast('error', err?.message || String(err));
+                          }
+                        })();
                       }}
+                      disabled={!stackGate.ok}
+                      title={!stackGate.ok ? 'Blocked until stack is ready' : ''}
                     >
-                      Prepare leave swap_channel
+                      Claim
                     </button>
-                  </div>
-                  <div className="row">
                     <button
                       className="btn"
                       onClick={() => {
-                        setRunMode('tool');
-                        setToolName('intercomswap_swaprecover_claim');
-                        setToolArgsBoth({ trade_id: selected.trade.trade_id });
-                        setPromptOpen(true);
+                        const trade_id = String(selected?.trade?.trade_id || '').trim();
+                        if (!trade_id) return;
+                        if (!stackGate.ok) return void stackBlockedToast('Refund');
+                        void (async () => {
+                          try {
+                            if (toolRequiresApproval('intercomswap_swaprecover_refund') && !autoApprove) {
+                              const ok = window.confirm(`Refund escrow now?\n\ntrade_id: ${trade_id}`);
+                              if (!ok) return;
+                            }
+                            await runToolFinal('intercomswap_swaprecover_refund', { trade_id }, { auto_approve: true });
+                            pushToast('success', `Refund submitted (${trade_id})`);
+                            void loadTradesPage({ reset: true });
+                            void loadOpenRefundsPage({ reset: true });
+                          } catch (err: any) {
+                            pushToast('error', err?.message || String(err));
+                          }
+                        })();
                       }}
+                      disabled={!stackGate.ok}
+                      title={!stackGate.ok ? 'Blocked until stack is ready' : ''}
                     >
-                      Prepare swaprecover_claim
-                    </button>
-                    <button
-                      className="btn"
-                      onClick={() => {
-                        setRunMode('tool');
-                        setToolName('intercomswap_swaprecover_refund');
-                        setToolArgsBoth({ trade_id: selected.trade.trade_id });
-                        setPromptOpen(true);
-                      }}
-                    >
-                      Prepare swaprecover_refund
+                      Refund
                     </button>
                   </div>
                 </>
               ) : (
-                <p className="muted">Select a trade receipt to see one-click tool-call templates.</p>
+                <p className="muted">Select a trade receipt.</p>
               )}
             </Panel>
           </div>
@@ -2047,17 +2470,6 @@ function App() {
                 >
                   {openRefundsLoading ? 'Loading…' : 'Refresh'}
                 </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_receipts_list_open_refunds');
-                    setToolArgsBoth({ limit: openRefundsLimit, offset: 0 });
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare list_open_refunds
-                </button>
                 {!openRefundsHasMore ? <span className="muted small">end</span> : null}
               </div>
               <VirtualList
@@ -2072,16 +2484,42 @@ function App() {
                     selected={selected?.type === 'trade' && selected?.trade?.trade_id === t?.trade_id}
                     onSelect={() => setSelected({ type: 'trade', trade: t })}
                     onRecoverClaim={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_swaprecover_claim');
-                      setToolArgsBoth({ trade_id: t.trade_id });
-                      setPromptOpen(true);
+                      if (!stackGate.ok) return void stackBlockedToast('Claim');
+                      const trade_id = String(t?.trade_id || '').trim();
+                      if (!trade_id) return;
+                      void (async () => {
+                        try {
+                          if (toolRequiresApproval('intercomswap_swaprecover_claim') && !autoApprove) {
+                            const ok = window.confirm(`Claim escrow now?\n\ntrade_id: ${trade_id}`);
+                            if (!ok) return;
+                          }
+                          await runToolFinal('intercomswap_swaprecover_claim', { trade_id }, { auto_approve: true });
+                          pushToast('success', `Claim submitted (${trade_id})`);
+                          void loadOpenClaimsPage({ reset: true });
+                          void loadTradesPage({ reset: true });
+                        } catch (err: any) {
+                          pushToast('error', err?.message || String(err));
+                        }
+                      })();
                     }}
                     onRecoverRefund={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_swaprecover_refund');
-                      setToolArgsBoth({ trade_id: t.trade_id });
-                      setPromptOpen(true);
+                      if (!stackGate.ok) return void stackBlockedToast('Refund');
+                      const trade_id = String(t?.trade_id || '').trim();
+                      if (!trade_id) return;
+                      void (async () => {
+                        try {
+                          if (toolRequiresApproval('intercomswap_swaprecover_refund') && !autoApprove) {
+                            const ok = window.confirm(`Refund escrow now?\n\ntrade_id: ${trade_id}`);
+                            if (!ok) return;
+                          }
+                          await runToolFinal('intercomswap_swaprecover_refund', { trade_id }, { auto_approve: true });
+                          pushToast('success', `Refund submitted (${trade_id})`);
+                          void loadOpenRefundsPage({ reset: true });
+                          void loadTradesPage({ reset: true });
+                        } catch (err: any) {
+                          pushToast('error', err?.message || String(err));
+                        }
+                      })();
                     }}
                   />
                 )}
@@ -2101,17 +2539,6 @@ function App() {
                 >
                   {openClaimsLoading ? 'Loading…' : 'Refresh'}
                 </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_receipts_list_open_claims');
-                    setToolArgsBoth({ limit: openClaimsLimit, offset: 0 });
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare list_open_claims
-                </button>
                 {!openClaimsHasMore ? <span className="muted small">end</span> : null}
               </div>
               <VirtualList
@@ -2126,16 +2553,42 @@ function App() {
                     selected={selected?.type === 'trade' && selected?.trade?.trade_id === t?.trade_id}
                     onSelect={() => setSelected({ type: 'trade', trade: t })}
                     onRecoverClaim={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_swaprecover_claim');
-                      setToolArgsBoth({ trade_id: t.trade_id });
-                      setPromptOpen(true);
+                      if (!stackGate.ok) return void stackBlockedToast('Claim');
+                      const trade_id = String(t?.trade_id || '').trim();
+                      if (!trade_id) return;
+                      void (async () => {
+                        try {
+                          if (toolRequiresApproval('intercomswap_swaprecover_claim') && !autoApprove) {
+                            const ok = window.confirm(`Claim escrow now?\n\ntrade_id: ${trade_id}`);
+                            if (!ok) return;
+                          }
+                          await runToolFinal('intercomswap_swaprecover_claim', { trade_id }, { auto_approve: true });
+                          pushToast('success', `Claim submitted (${trade_id})`);
+                          void loadOpenClaimsPage({ reset: true });
+                          void loadTradesPage({ reset: true });
+                        } catch (err: any) {
+                          pushToast('error', err?.message || String(err));
+                        }
+                      })();
                     }}
                     onRecoverRefund={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_swaprecover_refund');
-                      setToolArgsBoth({ trade_id: t.trade_id });
-                      setPromptOpen(true);
+                      if (!stackGate.ok) return void stackBlockedToast('Refund');
+                      const trade_id = String(t?.trade_id || '').trim();
+                      if (!trade_id) return;
+                      void (async () => {
+                        try {
+                          if (toolRequiresApproval('intercomswap_swaprecover_refund') && !autoApprove) {
+                            const ok = window.confirm(`Refund escrow now?\n\ntrade_id: ${trade_id}`);
+                            if (!ok) return;
+                          }
+                          await runToolFinal('intercomswap_swaprecover_refund', { trade_id }, { auto_approve: true });
+                          pushToast('success', `Refund submitted (${trade_id})`);
+                          void loadOpenRefundsPage({ reset: true });
+                          void loadTradesPage({ reset: true });
+                        } catch (err: any) {
+                          pushToast('error', err?.message || String(err));
+                        }
+                      })();
                     }}
                   />
                 )}
@@ -2144,8 +2597,8 @@ function App() {
           </div>
         ) : null}
 
-        {activeTab === 'wallets' ? (
-          <div className="grid2">
+	        {activeTab === 'wallets' ? (
+	          <div className="grid2">
             <Panel title="Lightning (BTC)">
               <div className="muted small">
                 impl/backend/network:{' '}
@@ -2163,53 +2616,37 @@ function App() {
                 ) : (
                   <span className="chip warn">no channels</span>
                 )}
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_ln_info');
-                    setToolArgsBoth({});
-                    setPromptOpen(true);
-                  }}
-                >
-                  ln_info
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_ln_listfunds');
-                    setToolArgsBoth({});
-                    setPromptOpen(true);
-                  }}
-                >
-                  ln_listfunds
-                </button>
               </div>
 
-              {String(envInfo?.ln?.backend || '') === 'docker' && String(envInfo?.ln?.network || '') === 'regtest' ? (
-                <button
-                  className="btn primary"
-                  disabled={runBusy}
-                  onClick={async () => {
-                    const ok =
-                      autoApprove ||
-                      window.confirm(
-                        'Bootstrap LN regtest now?\n\nThis will mine blocks, fund both LN node wallets, and open a channel (docker-only).'
-                      );
-                    if (!ok) return;
-                    await runPromptStream({
-                      prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_ln_regtest_init', arguments: {} }),
-                      session_id: sessionId,
-                      auto_approve: true,
-                      dry_run: false,
-                    });
-                    void refreshPreflight();
-                  }}
-                >
-                  Bootstrap regtest channel (mine+fund+open)
-                </button>
-              ) : null}
+	              {String(envInfo?.ln?.backend || '') === 'docker' && String(envInfo?.ln?.network || '') === 'regtest' ? (
+	                <button
+	                  className="btn primary"
+	                  disabled={runBusy}
+	                  onClick={async () => {
+	                    const ok =
+	                      autoApprove ||
+	                      window.confirm(
+	                        'Bootstrap LN regtest now?\n\nThis will mine blocks, fund both LN node wallets, and open a channel (docker-only).'
+	                      );
+	                    if (!ok) return;
+	                    pushToast('info', 'Bootstrapping LN regtest (mine+fund+open). This can take ~1 minute...', { ttlMs: 9000 });
+	                    const final = await runPromptStream({
+	                      prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_ln_regtest_init', arguments: {} }),
+	                      session_id: sessionId,
+	                      auto_approve: true,
+	                      dry_run: false,
+	                    });
+	                    if (final && typeof final === 'object' && String((final as any).type || '') === 'error') {
+	                      pushToast('error', String((final as any).error || 'LN bootstrap failed'));
+	                    } else {
+	                      pushToast('success', 'LN regtest ready');
+	                    }
+	                    void refreshPreflight();
+	                  }}
+	                >
+	                  Ensure regtest channel (mine+fund+open)
+	                </button>
+	              ) : null}
 
               <div className="field">
                 <div className="field-hd">
@@ -2248,94 +2685,96 @@ function App() {
                 </div>
               </div>
 
-              <div className="field">
-                <div className="field-hd">
-                  <span className="mono">Open Your First Channel</span>
-                </div>
-                <div className="muted small">
-                  Channels are reused across swaps. You typically need at least one channel to pay/receive invoices.
-                </div>
-                <div className="row">
-                  <input
-                    className="input mono"
-                    value={lnPeerInput}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setLnPeerInput(v);
-                      const m = String(v || '').trim().match(/^([0-9a-fA-F]{66})@/);
-                      if (m) setLnChannelNodeId(m[1]);
-                    }}
-                    placeholder="peer (nodeid@host:port)"
-                  />
-                  <button
-                    className="btn primary"
-                    disabled={runBusy || !lnPeerInput.trim()}
-                    onClick={async () => {
-                      const peer = lnPeerInput.trim();
-                      const ok = autoApprove || window.confirm(`Connect to LN peer?\n\n${peer}`);
-                      if (!ok) return;
-                      await runPromptStream({
-                        prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_ln_connect', arguments: { peer } }),
-                        session_id: sessionId,
-                        auto_approve: true,
-                        dry_run: false,
-                      });
-                    }}
-                  >
-                    Connect
-                  </button>
-                </div>
-                <div className="row">
-                  <input
-                    className="input mono"
-                    value={lnChannelNodeId}
-                    onChange={(e) => setLnChannelNodeId(e.target.value)}
-                    placeholder="node id (hex33)"
-                  />
-                  <input
-                    className="input mono"
-                    value={String(lnChannelAmountSats)}
-                    onChange={(e) => {
-                      const n = Number.parseInt(e.target.value, 10);
-                      if (Number.isFinite(n)) setLnChannelAmountSats(Math.max(0, Math.trunc(n)));
-                    }}
-                    placeholder="amount sats"
-                  />
-                  <label className="check">
+              {!(String(envInfo?.ln?.backend || '') === 'docker' && String(envInfo?.ln?.network || '') === 'regtest') ? (
+                <div className="field">
+                  <div className="field-hd">
+                    <span className="mono">Open Your First Channel</span>
+                  </div>
+                  <div className="muted small">
+                    Channels are reused across swaps. Paste a peer in the form <span className="mono">nodeid@host:port</span>.
+                  </div>
+                  <div className="row">
                     <input
-                      type="checkbox"
-                      checked={lnChannelPrivate}
-                      onChange={(e) => setLnChannelPrivate(e.target.checked)}
+                      className="input mono"
+                      value={lnPeerInput}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setLnPeerInput(v);
+                        const m = String(v || '').trim().match(/^([0-9a-fA-F]{66})@/);
+                        if (m) setLnChannelNodeId(m[1]);
+                      }}
+                      placeholder="peer (nodeid@host:port)"
                     />
-                    private
-                  </label>
-                  <button
-                    className="btn primary"
-                    disabled={runBusy || !lnChannelNodeId.trim() || lnChannelAmountSats <= 0}
-                    onClick={async () => {
-                      const node_id = lnChannelNodeId.trim();
-                      const amount_sats = lnChannelAmountSats;
-                      const ok =
-                        autoApprove ||
-                        window.confirm(`Open LN channel?\n\nnode_id: ${node_id}\namount_sats: ${amount_sats}`);
-                      if (!ok) return;
-                      await runPromptStream({
-                        prompt: JSON.stringify({
-                          type: 'tool',
-                          name: 'intercomswap_ln_fundchannel',
-                          arguments: { node_id, amount_sats, private: lnChannelPrivate },
-                        }),
-                        session_id: sessionId,
-                        auto_approve: true,
-                        dry_run: false,
-                      });
-                      void refreshPreflight();
-                    }}
-                  >
-                    Open Channel
-                  </button>
+                    <button
+                      className="btn primary"
+                      disabled={runBusy || !lnPeerInput.trim()}
+                      onClick={async () => {
+                        const peer = lnPeerInput.trim();
+                        const ok = autoApprove || window.confirm(`Connect to LN peer?\n\n${peer}`);
+                        if (!ok) return;
+                        await runPromptStream({
+                          prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_ln_connect', arguments: { peer } }),
+                          session_id: sessionId,
+                          auto_approve: true,
+                          dry_run: false,
+                        });
+                      }}
+                    >
+                      Connect
+                    </button>
+                  </div>
+                  <div className="row">
+                    <input
+                      className="input mono"
+                      value={lnChannelNodeId}
+                      onChange={(e) => setLnChannelNodeId(e.target.value)}
+                      placeholder="node id (hex33)"
+                    />
+                    <input
+                      className="input mono"
+                      value={String(lnChannelAmountSats)}
+                      onChange={(e) => {
+                        const n = Number.parseInt(e.target.value, 10);
+                        if (Number.isFinite(n)) setLnChannelAmountSats(Math.max(0, Math.trunc(n)));
+                      }}
+                      placeholder="amount sats"
+                    />
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={lnChannelPrivate}
+                        onChange={(e) => setLnChannelPrivate(e.target.checked)}
+                      />
+                      private
+                    </label>
+                    <button
+                      className="btn primary"
+                      disabled={runBusy || !lnChannelNodeId.trim() || lnChannelAmountSats <= 0}
+                      onClick={async () => {
+                        const node_id = lnChannelNodeId.trim();
+                        const amount_sats = lnChannelAmountSats;
+                        const ok =
+                          autoApprove ||
+                          window.confirm(`Open LN channel?\n\nnode_id: ${node_id}\namount_sats: ${amount_sats}`);
+                        if (!ok) return;
+                        await runPromptStream({
+                          prompt: JSON.stringify({
+                            type: 'tool',
+                            name: 'intercomswap_ln_fundchannel',
+                            arguments: { node_id, amount_sats, private: lnChannelPrivate },
+                          }),
+                          session_id: sessionId,
+                          auto_approve: true,
+                          dry_run: false,
+                        });
+                        void refreshPreflight();
+                      }}
+                    >
+                      Open Channel
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : null}
             </Panel>
 
             <Panel title="Solana">
@@ -2378,262 +2817,83 @@ function App() {
                   >
                     Refresh SOL balance
                   </button>
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_sol_config_get');
-                      setToolArgsBoth({});
-                      setPromptOpen(true);
-                    }}
-                  >
-                    sol_config_get
-                  </button>
                 </div>
               </div>
             </Panel>
-          </div>
+	          </div>
+	        ) : null}
+
+	        {activeTab === 'settings' ? (
+	          <Panel title="Settings">
+	            <div className="row">
+	              <label className="check">
+	                <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
+	                auto_approve
+	              </label>
+	            </div>
+	            <div className="field">
+	              <div className="field-hd">
+	                <span className="mono">Environment</span>
+	                {envInfo?.env_kind === 'test' ? (
+	                  <span className="chip hi">TEST</span>
+	                ) : envInfo?.env_kind === 'mainnet' ? (
+	                  <span className="chip danger">MAINNET</span>
+	                ) : envInfo?.env_kind === 'mixed' ? (
+	                  <span className="chip warn">MIXED</span>
+	                ) : (
+	                  <span className="chip">UNKNOWN</span>
+	                )}
+	              </div>
+	              <div className="muted small">
+	                LN: <span className="mono">{String(envInfo?.ln?.impl || '—')}</span> /{' '}
+	                <span className="mono">{String(envInfo?.ln?.network || '—')}</span> · Solana:{' '}
+	                <span className="mono">{String(envInfo?.solana?.classify?.kind || '—')}</span>
+	              </div>
+	              <div className="muted small">
+	                Solana RPC:{' '}
+	                <span className="mono">{String(Array.isArray(envInfo?.solana?.rpc_urls) ? envInfo.solana.rpc_urls[0] : '—')}</span>
+	              </div>
+	              <div className="muted small">
+	                receipts.db: <span className="mono">{String(envInfo?.receipts?.db || '—')}</span>
+	              </div>
+	              <div className="muted small">
+	                peer.keypair:{' '}
+	                <span className="mono">{String(envInfo?.peer?.keypair || '—')}</span>{' '}
+	                {envInfo?.peer?.exists === false ? <span className="chip warn">missing</span> : null}
+	              </div>
+	              {envErr ? <div className="alert bad">{String(envErr)}</div> : null}
+	              <div className="row">
+	                <button className="btn" onClick={refreshEnv} disabled={envBusy}>
+	                  {envBusy ? 'Refreshing…' : 'Refresh env'}
+	                </button>
+	              </div>
+	            </div>
+
+	            <p className="muted small">
+	              For external access: run promptd with <span className="mono">server.auth_token</span> + optional{' '}
+	              <span className="mono">server.tls</span> in <span className="mono">onchain/prompt/setup.json</span>.
+	            </p>
+          </Panel>
         ) : null}
 
-        {activeTab === 'peers' ? (
+        {activeTab === 'console' ? (
           <div className="grid2">
-            <Panel title="Peer Instances">
+            <Panel title="Console (Expert)">
               <div className="row">
-                <button className="btn primary" onClick={refreshPeersAndBots} disabled={peerStatusBusy || rfqbotStatusBusy}>
-                  {peerStatusBusy || rfqbotStatusBusy ? 'Refreshing…' : 'Refresh'}
+                <button className="btn" onClick={refreshTools} disabled={!health?.ok}>
+                  Reload tools
                 </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setToolInputMode('form');
-                    setToolArgsParseErr(null);
-                    setRunMode('tool');
-                    setToolName('intercomswap_peer_start');
-                    setToolArgsBoth({
-                      name: 'swap-maker-peer',
-                      store: 'swap-maker',
-                      sc_port: 49222,
-                      sidechannels: scChannels.split(',').map((s) => s.trim()).filter(Boolean),
-                      pow_enabled: true,
-                      pow_difficulty: 12,
-                      invite_required: true,
-                      welcome_required: false,
-                      invite_prefixes: ['swap:'],
-                    });
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare peer_start (swap-maker)
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_peer_status');
-                    setToolArgsBoth({});
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare peer_status
-                </button>
-              </div>
-              <p className="muted small">Note: never run the same store twice (single-store guard enforced).</p>
-
-              <VirtualList
-                items={Array.isArray(peerStatus?.peers) ? peerStatus.peers : []}
-                itemKey={(p) => String(p?.name || '')}
-                estimatePx={86}
-                render={(p) => (
-                  <PeerRow
-                    peer={p}
-                    onSelect={() => setSelected({ type: 'peer', peer: p })}
-                    onStop={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_peer_stop');
-                      setToolArgsBoth({ name: p.name });
-                      setPromptOpen(true);
-                    }}
-                    onRestart={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_peer_restart');
-                      setToolArgsBoth({ name: p.name });
-                      setPromptOpen(true);
-                    }}
-                  />
-                )}
-              />
-              {peerStatus?.type === 'error' ? <div className="alert bad">{String(peerStatus.error || 'peer_status failed')}</div> : null}
-            </Panel>
-            <Panel title="RFQ Bots">
-              <div className="row">
-                <button className="btn primary" onClick={refreshPeersAndBots} disabled={peerStatusBusy || rfqbotStatusBusy}>
-                  {peerStatusBusy || rfqbotStatusBusy ? 'Refreshing…' : 'Refresh'}
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_rfqbot_start_maker');
-                    setToolArgsBoth({ name: 'maker1', store: 'swap-maker', sc_port: 49222, argv: [] });
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare start_maker
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_rfqbot_start_taker');
-                    setToolArgsBoth({ name: 'taker1', store: 'swap-taker', sc_port: 49223, argv: [] });
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare start_taker
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setRunMode('tool');
-                    setToolName('intercomswap_rfqbot_status');
-                    setToolArgsBoth({});
-                    setPromptOpen(true);
-                  }}
-                >
-                  Prepare rfqbot_status
+                <label className="check small" title="Auto-approve tool runs that change state or can move funds.">
+                  <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
+                  approve
+                </label>
+                <button className="btn" onClick={() => promptAbortRef.current?.abort()} disabled={!runBusy}>
+                  Stop
                 </button>
               </div>
 
-              <VirtualList
-                items={Array.isArray(rfqbotStatus?.bots) ? rfqbotStatus.bots : []}
-                itemKey={(b) => String(b?.name || '')}
-                estimatePx={92}
-                render={(b) => (
-                  <BotRow
-                    bot={b}
-                    onSelect={() => setSelected({ type: 'bot', bot: b })}
-                    onStop={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_rfqbot_stop');
-                      setToolArgsBoth({ name: b.name });
-                      setPromptOpen(true);
-                    }}
-                    onRestart={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_rfqbot_restart');
-                      setToolArgsBoth({ name: b.name });
-                      setPromptOpen(true);
-                    }}
-                  />
-                )}
-              />
-              {rfqbotStatus?.type === 'error' ? <div className="alert bad">{String(rfqbotStatus.error || 'rfqbot_status failed')}</div> : null}
-            </Panel>
-          </div>
-        ) : null}
+              {runErr ? <div className="alert bad">Error: {runErr}</div> : null}
 
-        {activeTab === 'audit' ? (
-          <Panel title="Prompt History (local)">
-            <div className="row">
-              <label className="check small">
-                <input type="checkbox" checked={promptFollowTail} onChange={(e) => setPromptFollowTail(e.target.checked)} />
-                follow tail
-              </label>
-              <button className="btn" onClick={() => setPromptEvents([])}>
-                Clear (memory only)
-              </button>
-            </div>
-            <VirtualList
-              items={promptEvents}
-              itemKey={(e) => String(e.db_id || '') + ':' + String(e.type || '') + ':' + String(e.ts || '')}
-              estimatePx={68}
-              listRef={promptListRef}
-              onScroll={onPromptScroll}
-              render={(e) => (
-                <ConsoleEventRow evt={e} onSelect={() => setSelected({ type: 'prompt_event', evt: e })} />
-              )}
-            />
-          </Panel>
-        ) : null}
-
-        {activeTab === 'settings' ? (
-          <Panel title="Settings">
-            <div className="row">
-              <label className="check">
-                <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
-                auto_approve
-              </label>
-              <label className="check">
-                <input type="checkbox" checked={promptOpen} onChange={(e) => setPromptOpen(e.target.checked)} />
-                console open
-              </label>
-            </div>
-            <p className="muted small">
-              For external access: run promptd with `server.auth_token` + optional `server.tls` in
-              `onchain/prompt/setup.json`.
-            </p>
-          </Panel>
-        ) : null}
-      </main>
-
-      {inspectorOpen ? (
-        <aside className="inspector">
-          <Panel title="Inspector">
-            {!selected ? (
-              <p className="muted">Select an event to inspect.</p>
-            ) : (
-              <>
-                <pre className="code">{JSON.stringify(selected, null, 2)}</pre>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    if (selected?.type === 'sc_event') {
-                      setRunMode('tool');
-                      setToolName('intercomswap_sc_send_json');
-                      setToolArgsBoth({ channel: selected.evt.channel, json: { ack: true } });
-                      setPromptOpen(true);
-                    }
-                  }}
-                >
-                  Prepare reply tool-call
-                </button>
-              </>
-            )}
-          </Panel>
-        </aside>
-      ) : null}
-
-      <section className={`prompt ${promptOpen ? 'open' : 'closed'}`}>
-        <div className="promptbar">
-          <div className="promptbar-left">
-            <span className="tag">console</span>
-            <span className="muted small">session:</span>
-            <span className="mono small">{sessionId || 'new'}</span>
-          </div>
-          <div className="promptbar-right">
-            <label className="check small">
-              <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
-              approve
-            </label>
-            <label className="seg">
-              <input type="radio" name="mode" checked={runMode === 'tool'} onChange={() => setRunMode('tool')} />
-              <span>Tool</span>
-            </label>
-            <label className="seg">
-              <input type="radio" name="mode" checked={runMode === 'llm'} onChange={() => setRunMode('llm')} />
-              <span>LLM</span>
-            </label>
-            <button className="btn" onClick={() => promptAbortRef.current?.abort()}>
-              Stop
-            </button>
-          </div>
-        </div>
-
-        <div className="promptbody">
-          {runErr ? <div className="alert bad">Error: {runErr}</div> : null}
-
-          {runMode === 'tool' ? (
-            <div className="toolrun">
               <div className="row">
                 <input
                   className="input"
@@ -2647,6 +2907,7 @@ function App() {
                     name="toolinput"
                     checked={toolInputMode === 'form'}
                     onChange={() => {
+                      setRunMode('tool');
                       setToolInputMode('form');
                       setToolArgsParseErr(null);
                     }}
@@ -2659,6 +2920,7 @@ function App() {
                     name="toolinput"
                     checked={toolInputMode === 'json'}
                     onChange={() => {
+                      setRunMode('tool');
                       setToolInputMode('json');
                       setToolArgsText(JSON.stringify(toolArgsObj || {}, null, 2));
                       setToolArgsParseErr(null);
@@ -2673,6 +2935,7 @@ function App() {
                   className="select"
                   value={toolName}
                   onChange={(e) => {
+                    setRunMode('tool');
                     setToolName(e.target.value);
                     setToolArgsBoth({});
                     setToolArgsParseErr(null);
@@ -2689,50 +2952,32 @@ function App() {
                   ))}
                 </select>
                 <button
-                  className="btn"
-                  onClick={() => {
-                    setToolArgsBoth({});
-                    setToolArgsParseErr(null);
-                  }}
-                  disabled={runBusy}
-                >
-                  Reset
-                </button>
-                <button
                   className="btn primary"
                   onClick={onRun}
-                  disabled={runBusy || (toolNeedsFullStack(toolName) && !stackGate.ok)}
+                  disabled={runBusy || !stackGate.ok}
                   title={
-                    toolNeedsFullStack(toolName) && !stackGate.ok
-                      ? `Blocked until stack is ready:\n${stackGate.reasons.map((r) => `- ${r}`).join('\n')}`
-                      : toolRequiresApproval(toolName) && !autoApprove
-                        ? 'Will ask for one-time approval'
-                        : ''
+                    !stackGate.ok ? `Blocked until stack is ready:\n${stackGate.reasons.map((r) => `- ${r}`).join('\n')}` : ''
                   }
                 >
-                  {runBusy ? 'Running…' : toolRequiresApproval(toolName) && !autoApprove ? 'Approve + Run' : 'Run'}
+                  {runBusy ? 'Running…' : 'Run'}
                 </button>
               </div>
 
               {activeTool ? (
                 <div className="toolhelp">
-                  <div className="muted small">{activeTool.description}</div>
-                  {toolRequiresApproval(activeTool.name) ? (
+                  <div className="row">
+                    <span className="tag">{toolShortName(activeTool.name)}</span>
+                    <span className="muted small">{activeTool.description || ''}</span>
+                  </div>
+                  {toolRequiresApproval(toolName) && !autoApprove ? (
                     <div className="muted small">
-                      <span className="chip hi">requires approve</span> (this tool changes state or can move funds)
+                      <span className="chip warn">requires approve</span> (this tool changes state or can move funds)
                     </div>
                   ) : (
                     <div className="muted small">
                       <span className="chip">read-only</span>
                     </div>
                   )}
-                </div>
-              ) : null}
-
-              {toolRequiresApproval(toolName) && !autoApprove ? (
-                <div className="alert warn">
-                  This tool changes state (or can move funds). It will ask for a one-time approval unless you enable{' '}
-                  <span className="mono">approve</span>.
                 </div>
               ) : null}
 
@@ -2749,65 +2994,66 @@ function App() {
                   {toolArgsParseErr ? <div className="alert bad">{toolArgsParseErr}</div> : null}
                 </>
               )}
+            </Panel>
 
-              <details className="details">
-                <summary className="muted small">Args preview</summary>
-                <pre className="code">{JSON.stringify(toolArgsObj || {}, null, 2)}</pre>
-              </details>
-
-              <p className="muted small">
-                Tool mode executes structured tool calls only (no arbitrary shell) and does not expose network text to an
-                LLM by default.
-              </p>
-            </div>
-          ) : (
-            <div className="llmrun">
-              <textarea
-                className="textarea"
-                value={promptInput}
-                onChange={(e) => setPromptInput(e.target.value)}
-                placeholder="Natural-language prompt (advanced). Avoid pasting untrusted peer content."
-              />
+            <Panel title="Output">
               <div className="row">
-                <button
-                  className="btn primary"
-                  onClick={onRun}
-                  disabled={runBusy || !stackGate.ok}
-                  title={
-                    !stackGate.ok
-                      ? `Blocked until stack is ready:\n${stackGate.reasons.map((r) => `- ${r}`).join('\n')}`
-                      : ''
-                  }
-                >
-                  {runBusy ? 'Running…' : 'Run'}
-                </button>
-                <button className="btn" onClick={() => setPromptInput('')}>
-                  Clear
+                <span className="muted small">
+                  session: <span className="mono">{sessionId || 'new'}</span>
+                </span>
+                <button className="btn" onClick={() => setConsoleEvents([])} disabled={runBusy}>
+                  Clear output
                 </button>
               </div>
-            </div>
-          )}
+              <VirtualList
+                items={consoleEvents}
+                itemKey={(e) =>
+                  String(e?.type || '') + ':' + String(e?.ts || e?.started_at || '') + ':' + String(e?.name || '')
+                }
+                estimatePx={58}
+                listRef={consoleListRef}
+                render={(e) => <ConsoleEventRow evt={e} onSelect={() => setSelected({ type: 'console_event', evt: e })} />}
+              />
 
-          <div className="consoleout">
-            <div className="row">
-              <label className="check small">
-                <input type="checkbox" checked={consoleFollowTail} onChange={(e) => setConsoleFollowTail(e.target.checked)} />
-                follow tail
-              </label>
-              <button className="btn" onClick={() => setConsoleEvents([])} disabled={runBusy}>
-                Clear output
-              </button>
-            </div>
-            <VirtualList
-              items={consoleEvents}
-              itemKey={(e) => String(e?.type || '') + ':' + String(e?.ts || e?.started_at || '') + ':' + String(e?.name || '')}
-              estimatePx={58}
-              listRef={consoleListRef}
-              render={(e) => <ConsoleEventRow evt={e} onSelect={() => setSelected({ type: 'console_event', evt: e })} />}
-            />
+              <details className="details">
+                <summary className="muted small">Inspector</summary>
+                <pre className="code">{JSON.stringify(selected, null, 2)}</pre>
+              </details>
+
+              <details className="details">
+                <summary className="muted small">Audit (local)</summary>
+                <div className="row" style={{ marginBottom: 8 }}>
+                  <button className="btn small" onClick={() => setPromptEvents([])}>
+                    Clear (memory only)
+                  </button>
+                </div>
+                <VirtualList
+                  items={promptEvents}
+                  itemKey={(e) => String(e.db_id || '') + ':' + String(e.type || '') + ':' + String(e.ts || '')}
+                  estimatePx={68}
+                  listRef={promptListRef}
+                  onScroll={onPromptScroll}
+                  render={(e) => <ConsoleEventRow evt={e} onSelect={() => setSelected({ type: 'prompt_event', evt: e })} />}
+                />
+              </details>
+            </Panel>
           </div>
-        </div>
-      </section>
+        ) : null}
+      </main>
+
+      <div className="toasts" aria-live="polite">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast ${t.kind}`}>
+            <div>
+              <strong>{t.kind.toUpperCase()}</strong> <span className="muted">{new Date(t.ts).toLocaleTimeString()}</span>
+              <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>{t.message}</div>
+            </div>
+            <button className="x" onClick={() => dismissToast(t.id)} aria-label="Dismiss">
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2912,16 +3158,6 @@ function Panel({ title, children }: { title: string; children: any }) {
   );
 }
 
-function StatusPill({ label, state, value }: { label: string; state: 'ok' | 'bad' | 'idle' | 'neutral'; value?: string }) {
-  return (
-    <span className={`pill ${state}`}>
-      <span className="pill-dot" />
-      <span className="pill-label">{label}</span>
-      {value ? <span className="pill-value">{value}</span> : null}
-    </span>
-  );
-}
-
 function pow10n(n: number) {
   let out = 1n;
   for (let i = 0; i < n; i += 1) out *= 10n;
@@ -2978,6 +3214,39 @@ function secToHuman(sec: number) {
   if (sec % 3600 === 0) return `${sec / 3600}h`;
   if (sec % 60 === 0) return `${sec / 60}m`;
   return `${sec}s`;
+}
+
+function pad2(n: number) {
+  const s = String(Math.trunc(n));
+  return s.length >= 2 ? s : `0${s}`;
+}
+
+function unixSecToDateTimeLocal(sec: number) {
+  if (!Number.isFinite(sec) || sec < 1) return '';
+  const d = new Date(Math.trunc(sec) * 1000);
+  const yyyy = d.getFullYear();
+  const mm = pad2(d.getMonth() + 1);
+  const dd = pad2(d.getDate());
+  const hh = pad2(d.getHours());
+  const mi = pad2(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+function dateTimeLocalToUnixSec(value: string) {
+  const s = String(value || '').trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const yyyy = Number.parseInt(m[1], 10);
+  const mm = Number.parseInt(m[2], 10);
+  const dd = Number.parseInt(m[3], 10);
+  const hh = Number.parseInt(m[4], 10);
+  const mi = Number.parseInt(m[5], 10);
+  if (![yyyy, mm, dd, hh, mi].every((n) => Number.isFinite(n))) return null;
+  const d = new Date(yyyy, mm - 1, dd, hh, mi, 0, 0);
+  const ms = d.getTime();
+  if (!Number.isFinite(ms)) return null;
+  return Math.floor(ms / 1000);
 }
 
 function parseLines(text: string) {
@@ -3193,16 +3462,43 @@ function ToolForm({
                 }}
               />
             ) : sch?.type === 'array' ? (
-              <textarea
-                className="textarea mono"
-                value={Array.isArray(v) ? v.join('\n') : ''}
-                placeholder={isReq ? 'one per line (required)' : 'one per line (optional)'}
-                onChange={(e) => {
-                  const lines = parseLines(e.target.value);
-                  if (lines.length === 0) return isReq ? update(k, []) : del(k);
-                  update(k, lines);
-                }}
-              />
+              (() => {
+                const itemsType = (sch as any)?.items?.type;
+                const isStringList = itemsType === 'string';
+                const text = isStringList
+                  ? Array.isArray(v)
+                    ? v.map((x: any) => String(x ?? '')).join('\n')
+                    : ''
+                  : Array.isArray(v)
+                    ? JSON.stringify(v, null, 2)
+                    : v !== undefined && v !== null
+                      ? JSON.stringify(v, null, 2)
+                      : '';
+                return (
+                  <textarea
+                    className="textarea mono"
+                    value={text}
+                    placeholder={isStringList ? (isReq ? 'one per line (required)' : 'one per line (optional)') : 'JSON array'}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      if (!raw.trim()) return isReq ? update(k, isStringList ? [] : []) : del(k);
+                      if (isStringList) {
+                        const lines = parseLines(raw);
+                        if (lines.length === 0) return isReq ? update(k, []) : del(k);
+                        update(k, lines);
+                        return;
+                      }
+                      try {
+                        const parsed = JSON.parse(raw);
+                        if (!Array.isArray(parsed)) return;
+                        update(k, parsed);
+                      } catch (_e) {
+                        // Ignore invalid JSON; keep previous value.
+                      }
+                    }}
+                  />
+                );
+              })()
             ) : (
               <textarea
                 className="textarea mono"
@@ -3307,75 +3603,6 @@ function AtomicDisplayField({
           }}
         />
       )}
-      {err ? <div className="alert bad">{err}</div> : null}
-    </div>
-  );
-}
-
-function BtcSatsField({ name, sats, onSats }: { name: string; sats: number | null; onSats: (next: number | null) => void }) {
-  const [unit, setUnit] = useState<'BTC' | 'sats'>('BTC');
-  const [display, setDisplay] = useState('');
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (sats === null || sats === undefined) return;
-    if (unit === 'BTC') setDisplay(satsToBtcDisplay(sats));
-    else setDisplay(String(sats));
-  }, [sats, unit]);
-
-  return (
-    <div className="amt">
-      <div className="row">
-        <label className="seg">
-          <input type="radio" name={name} checked={unit === 'BTC'} onChange={() => setUnit('BTC')} />
-          <span>BTC</span>
-        </label>
-        <label className="seg">
-          <input type="radio" name={name} checked={unit === 'sats'} onChange={() => setUnit('sats')} />
-          <span>sats</span>
-        </label>
-      </div>
-      <input
-        className="input mono"
-        type="text"
-        value={display}
-        placeholder={unit === 'BTC' ? '0.001' : '10000'}
-        onChange={(e) => {
-          const raw = e.target.value;
-          setDisplay(raw);
-          if (!raw.trim()) {
-            setErr(null);
-            onSats(null);
-            return;
-          }
-          if (unit === 'sats') {
-            if (!/^[0-9]+$/.test(raw.trim())) {
-              setErr('sats must be digits');
-              return;
-            }
-            const n = Number.parseInt(raw.trim(), 10);
-            if (!Number.isFinite(n) || !Number.isSafeInteger(n)) {
-              setErr('invalid sats');
-              return;
-            }
-            setErr(null);
-            onSats(n);
-            return;
-          }
-          const r = btcDisplayToSats(raw);
-          if (!r || !r.ok) {
-            setErr(r ? r.error : 'invalid');
-            return;
-          }
-          setErr(null);
-          onSats(r.atomic);
-        }}
-      />
-      {typeof sats === 'number' ? (
-        <div className="muted small">
-          sats: <span className="mono">{sats}</span>
-        </div>
-      ) : null}
       {err ? <div className="alert bad">{err}</div> : null}
     </div>
   );
@@ -3586,6 +3813,207 @@ function MsatField({ name, msat, onMsat }: { name: string; msat: number | null; 
           onMsat(out);
         }}
       />
+      {err ? <div className="alert bad">{err}</div> : null}
+    </div>
+  );
+}
+
+function BtcSatsField({ name, sats, onSats }: { name: string; sats: number | null; onSats: (next: number | null) => void }) {
+  const [unit, setUnit] = useState<'sats' | 'btc'>('sats');
+  const [display, setDisplay] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (sats === null || sats === undefined) return;
+    if (unit === 'sats') setDisplay(String(Math.trunc(sats)));
+    else setDisplay(satsToBtcDisplay(Math.trunc(sats)));
+  }, [sats, unit]);
+
+  return (
+    <div className="amt">
+      <div className="row">
+        <label className="seg">
+          <input type="radio" name={name} checked={unit === 'sats'} onChange={() => setUnit('sats')} />
+          <span>sats</span>
+        </label>
+        <label className="seg">
+          <input type="radio" name={name} checked={unit === 'btc'} onChange={() => setUnit('btc')} />
+          <span>BTC</span>
+        </label>
+      </div>
+      <input
+        className="input mono"
+        type="text"
+        value={display}
+        placeholder={unit === 'sats' ? '10000' : '0.0001'}
+        onChange={(e) => {
+          const raw = e.target.value.trim();
+          setDisplay(raw);
+          if (!raw) {
+            setErr(null);
+            onSats(null);
+            return;
+          }
+          if (unit === 'sats') {
+            if (!/^[0-9]+$/.test(raw)) {
+              setErr('digits only');
+              return;
+            }
+            const n = Number.parseInt(raw, 10);
+            if (!Number.isFinite(n) || !Number.isSafeInteger(n) || n < 0) {
+              setErr('invalid number');
+              return;
+            }
+            setErr(null);
+            onSats(n);
+            return;
+          }
+
+          const r = btcDisplayToSats(raw);
+          if (!r || !r.ok) {
+            setErr(r?.error || 'invalid BTC amount');
+            return;
+          }
+          const n = r.atomic;
+          if (!Number.isFinite(n) || !Number.isSafeInteger(n) || n < 0) {
+            setErr('invalid number');
+            return;
+          }
+          setErr(null);
+          onSats(n);
+        }}
+      />
+      {typeof sats === 'number' ? (
+        <div className="muted small">
+          sats: <span className="mono">{Math.trunc(sats)}</span> ({satsToBtcDisplay(Math.trunc(sats))} BTC)
+        </div>
+      ) : null}
+      {err ? <div className="alert bad">{err}</div> : null}
+    </div>
+  );
+}
+
+function UsdtAtomicField({
+  decimals,
+  atomic,
+  onAtomic,
+  placeholder,
+}: {
+  decimals: number;
+  atomic: string | null;
+  onAtomic: (next: string | null) => void;
+  placeholder?: string;
+}) {
+  const [display, setDisplay] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    const a = String(atomic ?? '').trim();
+    if (!a) {
+      setDisplay('');
+      return;
+    }
+    setDisplay(atomicToDecimal(a, decimals));
+  }, [atomic, decimals]);
+
+  return (
+    <div className="amt">
+      <input
+        className="input mono"
+        type="text"
+        value={display}
+        placeholder={placeholder || '10'}
+        onChange={(e) => {
+          let raw = e.target.value.trim();
+          setDisplay(raw);
+          if (!raw) {
+            setErr(null);
+            onAtomic(null);
+            return;
+          }
+          // Allow "10." while typing.
+          if (raw.endsWith('.')) raw = raw.slice(0, -1);
+          const r = decimalToAtomic(raw, decimals);
+          if (!r || !r.ok) {
+            setErr(r?.error || 'invalid amount');
+            return;
+          }
+          setErr(null);
+          onAtomic(r.atomic);
+        }}
+      />
+      {String(atomic || '').trim() ? (
+        <div className="muted small">
+          base units: <span className="mono">{String(atomic)}</span>
+        </div>
+      ) : null}
+      {err ? <div className="alert bad">{err}</div> : null}
+    </div>
+  );
+}
+
+function PctBpsField({
+  label,
+  maxBps,
+  bps,
+  onBps,
+}: {
+  label: string;
+  maxBps: number;
+  bps: number | null;
+  onBps: (next: number | null) => void;
+}) {
+  const [display, setDisplay] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (bps === null || bps === undefined) return;
+    setDisplay(bpsToPctDisplay(bps));
+  }, [bps]);
+
+  return (
+    <div className="amt">
+      <div className="muted small">
+        {label} (%)
+      </div>
+      <input
+        className="input mono"
+        type="text"
+        value={display}
+        placeholder="0.50"
+        onChange={(e) => {
+          const raw = e.target.value.trim();
+          setDisplay(raw);
+          if (!raw) {
+            setErr(null);
+            onBps(0);
+            return;
+          }
+          let v = raw;
+          if (v.endsWith('.')) v = v.slice(0, -1);
+          const r = decimalToAtomic(v, 2);
+          if (!r || !r.ok) {
+            setErr(r?.error || 'invalid percent');
+            return;
+          }
+          const n = Number.parseInt(r.atomic, 10);
+          if (!Number.isFinite(n) || !Number.isSafeInteger(n) || n < 0) {
+            setErr('invalid percent');
+            return;
+          }
+          if (n > maxBps) {
+            setErr(`must be <= ${bpsToPctDisplay(maxBps)}%`);
+            return;
+          }
+          setErr(null);
+          onBps(n);
+        }}
+      />
+      {typeof bps === 'number' ? (
+        <div className="muted small">
+          bps: <span className="mono">{bps}</span>
+        </div>
+      ) : null}
       {err ? <div className="alert bad">{err}</div> : null}
     </div>
   );
@@ -3852,83 +4280,6 @@ function TradeRow({
           </button>
           <button className={`btn small ${canRefund ? 'primary' : ''}`} disabled={!canRefund} onClick={(e) => { e.stopPropagation(); onRecoverRefund(); }}>
             Refund
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PeerRow({
-  peer,
-  onSelect,
-  onStop,
-  onRestart,
-}: {
-  peer: any;
-  onSelect: () => void;
-  onStop: () => void;
-  onRestart: () => void;
-}) {
-  const alive = Boolean(peer?.alive);
-  const sc = peer?.sc_bridge;
-  const port = sc?.port ?? sc?.sc_port ?? null;
-  return (
-    <div className="rowitem" role="button" onClick={onSelect}>
-      <div className="rowitem-top">
-        <span className="mono chip">{String(peer?.name || '')}</span>
-        <span className="mono dim">{String(peer?.store || '')}</span>
-        {alive ? <span className="chip hi">alive</span> : <span className="chip">down</span>}
-      </div>
-      <div className="rowitem-mid">
-        <span className="mono">pid: {peer?.pid ?? '—'}</span>
-        <span className="mono">sc: {port ?? '—'}</span>
-      </div>
-      <div className="rowitem-bot">
-        <div className="row">
-          <button className="btn small" disabled={!alive} onClick={(e) => { e.stopPropagation(); onStop(); }}>
-            Stop
-          </button>
-          <button className="btn small" onClick={(e) => { e.stopPropagation(); onRestart(); }}>
-            Restart
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function BotRow({
-  bot,
-  onSelect,
-  onStop,
-  onRestart,
-}: {
-  bot: any;
-  onSelect: () => void;
-  onStop: () => void;
-  onRestart: () => void;
-}) {
-  const alive = Boolean(bot?.alive);
-  return (
-    <div className="rowitem" role="button" onClick={onSelect}>
-      <div className="rowitem-top">
-        <span className="mono chip">{String(bot?.name || '')}</span>
-        <span className="mono dim">{String(bot?.role || '')}</span>
-        {alive ? <span className="chip hi">alive</span> : <span className="chip">down</span>}
-      </div>
-      <div className="rowitem-mid">
-        <span className="mono">store: {String(bot?.store || '')}</span>
-        <span className="mono">sc: {bot?.sc_port ?? '—'}</span>
-        <span className="mono">pid: {bot?.pid ?? '—'}</span>
-      </div>
-      <div className="rowitem-bot">
-        <div className="row">
-          <button className="btn small" disabled={!alive} onClick={(e) => { e.stopPropagation(); onStop(); }}>
-            Stop
-          </button>
-          <button className="btn small" onClick={(e) => { e.stopPropagation(); onRestart(); }}>
-            Restart
           </button>
         </div>
       </div>

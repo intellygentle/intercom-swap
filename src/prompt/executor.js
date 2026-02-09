@@ -830,7 +830,9 @@ export class ToolExecutor {
           sidechannelInviteRequired: true,
           sidechannelInvitePrefixes: ['swap:'],
           logPath: '',
-          readyTimeoutMs: 20_000,
+          // Pear startup can be slow on first run / after updates. Avoid false negatives where the
+          // SC-Bridge port opens shortly after the wait window.
+          readyTimeoutMs: 60_000,
         });
       }
 
@@ -866,7 +868,7 @@ export class ToolExecutor {
           sidechannelInviteRequired: Boolean(aliveMatch?.args?.sidechannel_invite_required),
           sidechannelInvitePrefixes: Array.isArray(aliveMatch?.args?.sidechannel_invite_prefixes) ? aliveMatch.args.sidechannel_invite_prefixes : ['swap:'],
           logPath: '',
-          readyTimeoutMs: 20_000,
+          readyTimeoutMs: 60_000,
         });
         keypairOk = await waitForFile(inferredKeypair, { timeoutMs: 15_000 });
       }
@@ -908,16 +910,108 @@ export class ToolExecutor {
         }
       }
 
-      // Ensure Solana readiness (local validator bootstrap).
+      // Ensure Solana readiness (local validator bootstrap + required program config PDAs).
+      //
+      // Escrow init requires BOTH:
+      // - platform config PDA (program-wide)
+      // - trade config PDA (per trade_fee_collector)
+      //
+      // For local test validators we auto-init sane defaults so the stack is ready to settle swaps
+      // immediately after START (no extra terminal steps).
       let solOut = null;
       let solErr = null;
       try {
         const urls = String(this.solana?.rpcUrls || '').trim();
         const isLocal = urls.includes('127.0.0.1') || urls.includes('localhost');
-        if (solBootstrap && isLocal) {
-          solOut = await this.execute('intercomswap_sol_local_start', {}, { autoApprove: true, dryRun: false, secrets });
+
+        const signer = this._requireSolanaSigner();
+        const signerPubkey = signer.publicKey.toBase58();
+
+        const startLocal = async ({ reset = false } = {}) => {
+          if (!solBootstrap || !isLocal) return null;
+          return await this.execute(
+            'intercomswap_sol_local_start',
+            reset ? { reset: true } : {},
+            { autoApprove: true, dryRun: false, secrets }
+          );
+        };
+
+        const airdropIfLocal = async () => {
+          if (!isLocal) return null;
+          try {
+            // 2 SOL is plenty for local-dev config/init + swap txs.
+            return await this.execute(
+              'intercomswap_sol_airdrop',
+              { pubkey: signerPubkey, lamports: '2000000000' },
+              { autoApprove: true, dryRun: false, secrets }
+            );
+          } catch (_e) {
+            return null;
+          }
+        };
+
+        // Start local validator (idempotent).
+        solOut = await startLocal({ reset: false });
+        await airdropIfLocal();
+
+        // Platform config: required for escrow init.
+        let cfg = await this.execute('intercomswap_sol_config_get', {}, { autoApprove: false, dryRun: false, secrets });
+        if (!isLocal) {
+          if (!cfg) {
+            throw new Error('Solana program config is not initialized on-chain (admin must run sol_config_set once).');
+          }
+        } else {
+          // If the local ledger is stale and config belongs to a different authority, reset once.
+          if (cfg && typeof cfg === 'object') {
+            const auth = String(cfg.authority || '').trim();
+            if (auth && auth !== signerPubkey) {
+              // Reset local ledger and re-init config so the configured signer can operate.
+              await this.execute('intercomswap_sol_local_stop', {}, { autoApprove: true, dryRun: false, secrets });
+              solOut = await startLocal({ reset: true });
+              await airdropIfLocal();
+              cfg = null;
+            }
+          }
+
+          // Ensure platform config exists (default 0.5% for local-dev).
+          if (!cfg) {
+            await this.execute(
+              'intercomswap_sol_config_set',
+              { fee_bps: 50, fee_collector: signerPubkey },
+              { autoApprove: true, dryRun: false, secrets }
+            );
+            cfg = await this.execute('intercomswap_sol_config_get', {}, { autoApprove: false, dryRun: false, secrets });
+          }
         }
-        // Confirm the program config PDA is readable (signals RPC+program loaded).
+
+        // Ensure trade config for this signer exists (default 0.5% for local-dev).
+        let tcfg = await this.execute(
+          'intercomswap_sol_trade_config_get',
+          { fee_collector: signerPubkey },
+          { autoApprove: false, dryRun: false, secrets }
+        );
+        if (!isLocal) {
+          if (!tcfg) {
+            throw new Error(
+              `Solana trade fee config missing for fee_collector=${signerPubkey}. Run sol_trade_config_set before swapping.`
+            );
+          }
+        } else {
+          if (!tcfg) {
+            await this.execute(
+              'intercomswap_sol_trade_config_set',
+              { fee_bps: 50, fee_collector: signerPubkey },
+              { autoApprove: true, dryRun: false, secrets }
+            );
+            tcfg = await this.execute(
+              'intercomswap_sol_trade_config_get',
+              { fee_collector: signerPubkey },
+              { autoApprove: false, dryRun: false, secrets }
+            );
+          }
+        }
+
+        // Final sanity check: read config PDA (signals RPC+program loaded).
         await this.execute('intercomswap_sol_config_get', {}, { autoApprove: false, dryRun: false, secrets });
       } catch (err) {
         solErr = err?.message ?? String(err);
@@ -2140,7 +2234,8 @@ export class ToolExecutor {
       const composeFileRaw = args.compose_file ? String(args.compose_file).trim() : String(this.ln?.composeFile || '').trim();
       if (!composeFileRaw) throw new Error(`${toolName}: missing compose file (ln.compose_file)`);
       const composeFile = resolveWithinRepoRoot(composeFileRaw, { label: 'compose_file', mustExist: true });
-      const { stdout } = await dockerCompose({ composeFile, args: ['ps', '--format', 'json'], cwd: process.cwd() });
+      // Include non-running services so operators can see crash loops / exited containers.
+      const { stdout } = await dockerCompose({ composeFile, args: ['ps', '-a', '--format', 'json'], cwd: process.cwd() });
       const text = String(stdout || '').trim();
 
       // docker compose outputs one JSON object per line (NDJSON), not a single JSON array.
