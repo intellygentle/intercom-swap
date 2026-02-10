@@ -64,6 +64,31 @@ function App() {
       return false;
     }
   });
+  const [showDismissedInvites, setShowDismissedInvites] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_show_dismissed_invites') || '') === '1';
+    } catch (_e) {
+      return false;
+    }
+  });
+  const [dismissedInviteTradeIds, setDismissedInviteTradeIds] = useState<Record<string, number>>(() => {
+    try {
+      const raw = String(window.localStorage.getItem('collin_dismissed_invites') || '').trim();
+      if (!raw) return {};
+      const obj: any = JSON.parse(raw);
+      if (!obj || typeof obj !== 'object') return {};
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(obj)) {
+        const key = String(k || '').trim();
+        if (!key) continue;
+        const n = typeof v === 'number' ? v : typeof v === 'string' && /^[0-9]+$/.test(v.trim()) ? Number.parseInt(v.trim(), 10) : 0;
+        out[key] = Number.isFinite(n) && n > 0 ? n : Date.now();
+      }
+      return out;
+    } catch (_e) {
+      return {};
+    }
+  });
 
 	  const [selected, setSelected] = useState<any>(null);
 
@@ -195,6 +220,18 @@ function App() {
       window.localStorage.setItem('collin_show_expired_invites', showExpiredInvites ? '1' : '0');
     } catch (_e) {}
   }, [showExpiredInvites]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_show_dismissed_invites', showDismissedInvites ? '1' : '0');
+    } catch (_e) {}
+  }, [showDismissedInvites]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_dismissed_invites', JSON.stringify(dismissedInviteTradeIds || {}));
+    } catch (_e) {}
+  }, [dismissedInviteTradeIds]);
 
   useEffect(() => {
     // Best-effort UX: infer token mint from the most recent receipt, so operators immediately see the right USDT mint.
@@ -633,6 +670,7 @@ function App() {
               : null;
         const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
         if (expired && !showExpiredInvites) continue;
+        if (tradeId && dismissedInviteTradeIds && dismissedInviteTradeIds[tradeId] && !showDismissedInvites) continue;
 
         const key = `${tradeId || ''}|${swapCh || ''}|${String((e as any)?.from || '')}|${String((e as any)?.seq || '')}`;
         if (key && seen.has(key)) continue;
@@ -641,7 +679,7 @@ function App() {
       } catch (_e) {}
     }
     return out;
-  }, [filteredScEvents, showExpiredInvites]);
+  }, [filteredScEvents, showExpiredInvites, dismissedInviteTradeIds, showDismissedInvites]);
 
   const knownChannels = useMemo(() => {
     const set = new Set<string>();
@@ -676,6 +714,22 @@ function App() {
     for (const c of scChannels.split(',').map((s) => s.trim()).filter(Boolean)) set.add(c);
     return set;
   }, [scChannels]);
+
+  function dismissInviteTrade(tradeIdRaw: string) {
+    const tradeId = String(tradeIdRaw || '').trim();
+    if (!tradeId) return;
+    setDismissedInviteTradeIds((prev) => ({ ...(prev || {}), [tradeId]: Date.now() }));
+  }
+
+  function undismissInviteTrade(tradeIdRaw: string) {
+    const tradeId = String(tradeIdRaw || '').trim();
+    if (!tradeId) return;
+    setDismissedInviteTradeIds((prev) => {
+      const next = { ...(prev || {}) };
+      delete next[tradeId];
+      return next;
+    });
+  }
 
   function setWatchedChannels(next: string[]) {
     const uniq: string[] = [];
@@ -3947,6 +4001,14 @@ function App() {
                     />
                     <span className="mono">show expired</span>
                   </label>
+                  <label className="row">
+                    <input
+                      type="checkbox"
+                      checked={showDismissedInvites}
+                      onChange={(e) => setShowDismissedInvites(Boolean(e.target.checked))}
+                    />
+                    <span className="mono">show dismissed</span>
+                  </label>
                 </div>
 	              <VirtualList
 	                items={inviteEvents}
@@ -3957,6 +4019,10 @@ function App() {
 	                    evt={e}
 	                    onSelect={() => setSelected({ type: 'invite', evt: e })}
 	                    onJoin={() => {
+                        try {
+                          const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+                          if (tradeId) dismissInviteTrade(tradeId);
+                        } catch (_e) {}
 	                      if (toolRequiresApproval('intercomswap_join_from_swap_invite') && !autoApprove) {
 	                        const ok = window.confirm('Join this swap channel now?');
 	                        if (!ok) return;
@@ -3972,6 +4038,10 @@ function App() {
                             void refreshPreflight();
 	                        } catch (err: any) {
 	                          pushToast('error', err?.message || String(err));
+                            try {
+                              const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+                              if (tradeId) undismissInviteTrade(tradeId);
+                            } catch (_e) {}
 	                        }
 	                      })();
 	                    }}
@@ -3984,6 +4054,10 @@ function App() {
                       onLeave={() => {
                         const swapCh = String((e as any)?.message?.body?.swap_channel || '').trim();
                         if (!swapCh) return;
+                        try {
+                          const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+                          if (tradeId) dismissInviteTrade(tradeId);
+                        } catch (_e) {}
                         if (toolRequiresApproval('intercomswap_sc_leave') && !autoApprove) {
                           const ok = window.confirm(`Leave channel?\n\n${swapCh}`);
                           if (!ok) return;
@@ -3995,6 +4069,10 @@ function App() {
                             if (watchedChannelsSet.has(swapCh)) unwatchChannel(swapCh);
                           } catch (err: any) {
                             pushToast('error', err?.message || String(err));
+                            try {
+                              const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+                              if (tradeId) undismissInviteTrade(tradeId);
+                            } catch (_e) {}
                           }
                         })();
                       }}
@@ -4016,6 +4094,26 @@ function App() {
                           }
                         })();
                       }}
+                      onDismiss={() => {
+                        const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+                        if (!tradeId) return;
+                        dismissInviteTrade(tradeId);
+                        pushToast('success', `Dismissed invite (${tradeId})`);
+                      }}
+                      onUndismiss={() => {
+                        const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+                        if (!tradeId) return;
+                        undismissInviteTrade(tradeId);
+                        pushToast('success', `Restored invite (${tradeId})`);
+                      }}
+                      dismissed={(() => {
+                        try {
+                          const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+                          return tradeId ? Boolean(dismissedInviteTradeIds && dismissedInviteTradeIds[tradeId]) : false;
+                        } catch (_e) {
+                          return false;
+                        }
+                      })()}
                       watched={(() => {
                         try {
                           const swapCh = String((e as any)?.message?.body?.swap_channel || '').trim();
@@ -4243,26 +4341,26 @@ function App() {
                     >
                       Leave swap channel
                     </button>
-                    <button
-                      className="btn"
-                      onClick={() => {
-                        void recoverClaimForTrade(selected?.trade);
-                      }}
-                      disabled={!stackGate.ok}
-                      title={!stackGate.ok ? 'Blocked until stack is ready' : ''}
-                    >
-                      Claim
-                    </button>
-                    <button
-                      className="btn"
-                      onClick={() => {
-                        void recoverRefundForTrade(selected?.trade);
-                      }}
-                      disabled={!stackGate.ok}
-                      title={!stackGate.ok ? 'Blocked until stack is ready' : ''}
-                    >
-                      Refund
-                    </button>
+	                    <button
+	                      className="btn"
+	                      onClick={() => {
+	                        void recoverClaimForTrade(selected?.trade);
+	                      }}
+	                      aria-disabled={!stackGate.ok}
+	                      title={!stackGate.ok ? 'Blocked until stack is ready (click for details)' : 'Claim (if available)'}
+	                    >
+	                      Claim
+	                    </button>
+	                    <button
+	                      className="btn"
+	                      onClick={() => {
+	                        void recoverRefundForTrade(selected?.trade);
+	                      }}
+	                      aria-disabled={!stackGate.ok}
+	                      title={!stackGate.ok ? 'Blocked until stack is ready (click for details)' : 'Refund (if available)'}
+	                    >
+	                      Refund
+	                    </button>
                   </div>
                 </>
               ) : (
@@ -6405,7 +6503,10 @@ function InviteRow({
   onWatch,
   onLeave,
   onReceipt,
+  onDismiss,
+  onUndismiss,
   watched,
+  dismissed,
 }: {
   evt: any;
   onSelect: () => void;
@@ -6413,7 +6514,10 @@ function InviteRow({
   onWatch: () => void;
   onLeave: () => void;
   onReceipt: () => void;
+  onDismiss: () => void;
+  onUndismiss: () => void;
   watched: boolean;
+  dismissed: boolean;
 }) {
   const msg = evt?.message;
   const body = msg?.body;
@@ -6435,6 +6539,7 @@ function InviteRow({
         {swapChannel ? <span className="mono chip hi">{swapChannel}</span> : null}
         {expired ? <span className="mono chip warn">expired</span> : null}
         {watched ? <span className="mono chip">watched</span> : null}
+        {dismissed ? <span className="mono chip dim">dismissed</span> : null}
       </div>
       <div className="rowitem-mid">
         <span className="mono">swap_invite</span>
@@ -6485,6 +6590,29 @@ function InviteRow({
           >
             Receipt
           </button>
+        ) : null}
+        {tradeId ? (
+          dismissed ? (
+            <button
+              className="btn small"
+              onClick={(e) => {
+                e.stopPropagation();
+                onUndismiss();
+              }}
+            >
+              Undismiss
+            </button>
+          ) : (
+            <button
+              className="btn small"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDismiss();
+              }}
+            >
+              Dismiss
+            </button>
+          )
         ) : null}
       </div>
     </div>
