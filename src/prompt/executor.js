@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
@@ -416,6 +416,62 @@ async function dockerCompose({ composeFile, args, cwd }) {
     e.code = err?.code;
     throw e;
   }
+}
+
+async function dockerComposeWithStdin({ composeFile, args, cwd, stdinText, timeoutMs = 30_000 }) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('docker', ['compose', '-f', composeFile, ...args], {
+      cwd,
+      env: { ...process.env, COPYFILE_DISABLE: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    const max = 1024 * 1024 * 10;
+    const onData = (chunk, which) => {
+      const s = String(chunk || '');
+      if (which === 'out') stdout += s;
+      else stderr += s;
+      if (stdout.length + stderr.length > max) {
+        try {
+          proc.kill('SIGKILL');
+        } catch (_e) {}
+        reject(new Error('docker compose output exceeded maxBuffer'));
+      }
+    };
+    proc.stdout.on('data', (c) => onData(c, 'out'));
+    proc.stderr.on('data', (c) => onData(c, 'err'));
+
+    const t = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch (_e) {}
+      reject(new Error('docker compose command timed out'));
+    }, Math.max(1000, Math.min(120_000, timeoutMs)));
+
+    proc.on('error', (err) => {
+      clearTimeout(t);
+      reject(err);
+    });
+    proc.on('exit', (code) => {
+      clearTimeout(t);
+      if (code === 0) resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+      else {
+        const msg = String(stderr || '').trim() || String(stdout || '').trim() || `docker compose exited with code ${code}`;
+        reject(new Error(msg));
+      }
+    });
+
+    try {
+      if (stdinText !== null && stdinText !== undefined && proc.stdin) {
+        proc.stdin.write(String(stdinText));
+      }
+    } catch (_e) {}
+    try {
+      proc.stdin?.end?.();
+    } catch (_e) {}
+  });
 }
 
 export class ToolExecutor {
@@ -1182,9 +1238,36 @@ export class ToolExecutor {
           lnOut = { type: 'ln_status', channels: channelCount };
         }
       } catch (err) {
-        lnErr = appendErr(lnErr, err?.message ?? String(err));
-        if (lnBootstrap && String(this.ln?.backend || '').trim() === 'docker' && String(this.ln?.network || '').trim().toLowerCase() === 'regtest') {
-          await tryLnRegtestInit({ originalError: err?.message ?? String(err) });
+        const msg = err?.message ?? String(err);
+        lnErr = appendErr(lnErr, msg);
+        const net = String(this.ln?.network || '').trim().toLowerCase();
+        const isDocker = String(this.ln?.backend || '').trim() === 'docker';
+        const isRegtest = net === 'regtest' || net === 'reg';
+        const isLnd = String(this.ln?.impl || '').trim() === 'lnd';
+
+        if (lnBootstrap && isDocker && isRegtest) {
+          await tryLnRegtestInit({ originalError: msg });
+        } else if (lnBootstrap && isDocker && !isRegtest && isLnd) {
+          // Mainnet/testnet LND typically requires an unlock after container start. If we detect
+          // a locked wallet, unlock using the onchain password file (by convention) and retry.
+          const lowered = String(msg || '').toLowerCase();
+          const looksLocked = lowered.includes('wallet is locked') || lowered.includes('wallet locked') || lowered.includes('unlock');
+          if (looksLocked) {
+            try {
+              await this.execute('intercomswap_ln_unlock', {}, { autoApprove: true, dryRun: false, secrets });
+              const funds2 = await lnListFunds(this.ln);
+              const channels2 = Array.isArray(funds2?.channels)
+                ? funds2.channels
+                : Array.isArray(funds2?.channels?.channels)
+                  ? funds2.channels.channels
+                  : [];
+              const channelCount2 = Array.isArray(channels2) ? channels2.length : 0;
+              lnOut = { type: 'ln_status', channels: channelCount2, unlocked: true };
+              lnErr = null;
+            } catch (unlockErr) {
+              lnErr = appendErr(lnErr, `ln_unlock: ${unlockErr?.message ?? String(unlockErr)}`);
+            }
+          }
         }
       }
 
@@ -2941,6 +3024,67 @@ export class ToolExecutor {
     }
 
     // Lightning tools
+    if (toolName === 'intercomswap_ln_unlock') {
+      assertAllowedKeys(args, toolName, ['password_file', 'timeout_ms']);
+      requireApproval(toolName, autoApprove);
+      if (String(this.ln?.impl || '').trim() !== 'lnd') {
+        throw new Error(`${toolName}: ln.impl must be "lnd"`);
+      }
+      if (String(this.ln?.backend || '').trim() !== 'docker') {
+        throw new Error(`${toolName}: ln.backend must be "docker"`);
+      }
+      const composeFileRaw = String(this.ln?.composeFile || '').trim();
+      if (!composeFileRaw) throw new Error(`${toolName}: missing compose file (ln.compose_file)`);
+      const composeFile = resolveWithinRepoRoot(composeFileRaw, { label: 'ln.compose_file', mustExist: true });
+
+      const svcRaw = String(this.ln?.service || '').trim();
+      if (!svcRaw) throw new Error(`${toolName}: missing ln.service`);
+      const service = normalizeDockerServiceName(svcRaw, 'ln.service');
+
+      let net = String(this.ln?.network || '').trim().toLowerCase();
+      if (net === 'bitcoin' || net === 'main' || net === 'btc') net = 'mainnet';
+      if (!net) net = 'mainnet';
+
+      const timeoutMs = Number.isInteger(args.timeout_ms) ? Math.max(1000, Math.min(120_000, args.timeout_ms)) : 30_000;
+
+      const passwordFileArg = expectOptionalString(args, toolName, 'password_file', { min: 1, max: 400, pattern: /^[^\s]+$/ });
+      let passwordFile = passwordFileArg ? resolveOnchainPath(passwordFileArg, { label: 'password_file' }) : '';
+      if (!passwordFile) {
+        const role = /maker/i.test(service) ? 'maker' : /taker/i.test(service) ? 'taker' : '';
+        if (role) {
+          passwordFile = resolveOnchainPath(path.join(process.cwd(), 'onchain', 'lnd', net, `${role}.wallet-password.txt`), {
+            label: 'password_file',
+          });
+        }
+      }
+      if (!passwordFile) {
+        throw new Error(`${toolName}: password_file is required (could not infer from ln.service=${service})`);
+      }
+
+      const pw = String(fs.readFileSync(passwordFile, 'utf8') || '').trim();
+      if (!pw) throw new Error(`${toolName}: empty wallet password file`);
+
+      if (dryRun) {
+        return { type: 'dry_run', tool: toolName, compose_file: composeFile, service, network: net, password_file: passwordFile };
+      }
+
+      const out = await dockerComposeWithStdin({
+        composeFile,
+        cwd: process.cwd(),
+        args: ['exec', '-T', service, 'lncli', `--network=${net}`, 'unlock', '--stdin'],
+        stdinText: `${pw}\n`,
+        timeoutMs,
+      });
+
+      return {
+        type: 'ln_unlocked',
+        compose_file: composeFile,
+        service,
+        network: net,
+        stdout: String(out.stdout || '').trim() || null,
+        stderr: String(out.stderr || '').trim() || null,
+      };
+    }
     if (toolName === 'intercomswap_ln_info') {
       assertAllowedKeys(args, toolName, []);
       return lnGetInfo(this.ln);

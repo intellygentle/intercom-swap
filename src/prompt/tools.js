@@ -721,6 +721,26 @@ export const INTERCOMSWAP_TOOLS = [
       required: [],
     }
   ),
+  tool(
+    'intercomswap_ln_unlock',
+    'LND-only: unlock the wallet (docker backend). Uses a password file under onchain/ (gitignored).',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        password_file: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 400,
+          pattern: '^[^\\s]+$',
+          description:
+            'Path to a file containing the LND wallet password. Must be under onchain/. If omitted, promptd will try to infer it from ln.service (maker/taker).',
+        },
+        timeout_ms: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Optional timeout (default 30000).' },
+      },
+      required: [],
+    }
+  ),
   tool('intercomswap_ln_info', 'Get Lightning node info (impl/backend configured locally).', emptyParams),
   tool('intercomswap_ln_newaddr', 'Get a new on-chain BTC address from the LN node wallet.', emptyParams),
   tool('intercomswap_ln_listfunds', 'Get on-chain + channel balances.', emptyParams),
