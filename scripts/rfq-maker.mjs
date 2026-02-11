@@ -161,6 +161,7 @@ async function main() {
   const runSwap = parseBool(flags.get('run-swap'), false);
   const swapTimeoutSec = parseIntFlag(flags.get('swap-timeout-sec'), 'swap-timeout-sec', 300);
   const swapResendMs = parseIntFlag(flags.get('swap-resend-ms'), 'swap-resend-ms', 1200);
+  const retryResendMinMs = parseIntFlag(flags.get('retry-resend-min-ms'), 'retry-resend-min-ms', 20_000);
   const termsValidSec = parseIntFlag(flags.get('terms-valid-sec'), 'terms-valid-sec', 300);
   // Default to a long recovery window for the LN payer to claim, but allow overriding for market makers.
   const solRefundAfterSec = parseIntFlag(flags.get('solana-refund-after-sec'), 'solana-refund-after-sec', 72 * 3600);
@@ -689,8 +690,8 @@ async function main() {
         const nowMs = Date.now();
         const lastRemoteMs = Number(ctx.lastRemoteActivityAtMs || 0);
         const idleMs = lastRemoteMs > 0 ? nowMs - lastRemoteMs : Number.POSITIVE_INFINITY;
-        const termsCadenceMs = idleMs > 30_000 ? Math.max(swapResendMs, 10_000) : Math.max(swapResendMs, 4_000);
-        const invoiceCadenceMs = idleMs > 30_000 ? Math.max(swapResendMs, 12_000) : Math.max(swapResendMs, 5_000);
+        const termsCadenceMs = idleMs > 30_000 ? Math.max(swapResendMs, 20_000) : Math.max(swapResendMs, 10_000);
+        const invoiceCadenceMs = idleMs > 30_000 ? Math.max(swapResendMs, 25_000) : Math.max(swapResendMs, 12_000);
 
         if (ctx.trade.state === STATE.TERMS && ctx.sent.terms && (nowMs - Number(ctx.lastTermsSendAtMs || 0) >= termsCadenceMs)) {
           await sc.send(ctx.swapChannel, ctx.sent.terms, { invite: ctx.invite || null });
@@ -965,8 +966,7 @@ async function main() {
         // Prevent quote hijacking: only the original RFQ signer is allowed to accept its quote.
         if (known.rfq_signer && inviteePubKey !== String(known.rfq_signer).trim().toLowerCase()) return;
 
-        // If a swap is already in-flight for this trade, treat quote_accept as a retry signal and re-send
-        // a fresh swap invite (do not reset the swap state machine).
+        // If a swap is already in-flight for this trade, treat quote_accept as a retry signal.
         const existing = swaps.get(swapChannel);
         const pendingInvitee = pendingSwaps.get(swapChannel);
         const isRetry = Boolean(existing || pendingInvitee);
@@ -1024,9 +1024,33 @@ async function main() {
           },
         });
         const swapInviteSigned = signSwapEnvelope(swapInviteUnsigned, signing);
-        // Suppress repost handling once quote_accept/invite is in-flight for this trade_id.
+        // Recovery for duplicate quote_accept while in-flight:
+        // resend invite/terms with hard throttling so taker recovery works without flooding.
         if (isRetry) {
-          if (debug) process.stderr.write(`[maker] ignore duplicate quote_accept while in-flight trade_id=${tradeId} swap_channel=${swapChannel}\n`);
+          const nowMs = Date.now();
+          const resendFloorMs = Math.max(5_000, retryResendMinMs);
+          let resent = 0;
+          if (existing?.sent?.swap_invite && nowMs - Number(existing.lastInviteSendAtMs || 0) >= resendFloorMs) {
+            ensureOk(await sc.send(rfqChannel, existing.sent.swap_invite), 'resend swap_invite');
+            existing.lastInviteSendAtMs = nowMs;
+            resent += 1;
+            process.stdout.write(
+              `${JSON.stringify({ type: 'swap_invite_resent', trade_id: tradeId, rfq_id: rfqId, quote_id: quoteId, swap_channel: swapChannel })}\n`
+            );
+          }
+          if (existing?.sent?.terms && nowMs - Number(existing.lastTermsSendAtMs || 0) >= resendFloorMs) {
+            ensureOk(await sc.send(swapChannel, existing.sent.terms, { invite: existing.invite || null }), 'resend terms');
+            existing.lastTermsSendAtMs = nowMs;
+            resent += 1;
+            process.stdout.write(
+              `${JSON.stringify({ type: 'terms_resent', trade_id: tradeId, swap_channel: swapChannel })}\n`
+            );
+          }
+          if (debug) {
+            process.stderr.write(
+              `[maker] duplicate quote_accept in-flight trade_id=${tradeId} swap_channel=${swapChannel} resent=${resent}\n`
+            );
+          }
           return;
         }
 
@@ -1034,8 +1058,9 @@ async function main() {
           ensureOk(await sc.send(rfqChannel, swapInviteSigned), 'send swap_invite');
           ensureOk(await sc.join(swapChannel, { welcome }), `join ${swapChannel}`);
           ensureOk(await sc.subscribe([swapChannel]), `subscribe ${swapChannel}`);
-
-          process.stdout.write(`${JSON.stringify({ type: 'swap_invite_sent', trade_id: tradeId, rfq_id: rfqId, quote_id: quoteId, swap_channel: swapChannel })}\n`);
+          process.stdout.write(
+            `${JSON.stringify({ type: 'swap_invite_sent', trade_id: tradeId, rfq_id: rfqId, quote_id: quoteId, swap_channel: swapChannel })}\n`
+          );
 
           if (!runSwap) {
             if (once) await leaveSidechannel(swapChannel);
@@ -1062,10 +1087,13 @@ async function main() {
             deadlineMs: Date.now() + swapTimeoutSec * 1000,
             resender: null,
             lastRemoteActivityAtMs: Date.now(),
+            lastInviteSendAtMs: 0,
             lastTermsSendAtMs: 0,
             lastInvoiceSendAtMs: 0,
             lastEscrowSendAtMs: 0,
           };
+          ctx.sent.swap_invite = swapInviteSigned;
+          ctx.lastInviteSendAtMs = Date.now();
           swaps.set(swapChannel, ctx);
           if (lock) {
             lock.state = 'swapping';

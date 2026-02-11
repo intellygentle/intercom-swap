@@ -379,12 +379,12 @@ export class TradeAutoManager {
     const waitingTermsPingCooldownMs = clampInt(toIntOrNull(opts.waiting_terms_ping_cooldown_ms), {
       min: 1_000,
       max: 120_000,
-      fallback: 6_000,
+      fallback: 15_000,
     });
     const waitingTermsMaxPings = clampInt(toIntOrNull(opts.waiting_terms_max_pings), {
       min: 0,
       max: 500,
-      fallback: 40,
+      fallback: 20,
     });
     const waitingTermsMaxWaitMs = clampInt(toIntOrNull(opts.waiting_terms_max_wait_ms), {
       min: 5_000,
@@ -1486,33 +1486,22 @@ export class TradeAutoManager {
               const pingErrors = [];
               try {
                 if (isObject(quoteAcceptEnv)) {
-                  const replayChannels = Array.from(
-                    new Set(
-                      [
-                        swapChannel,
-                        String(neg?.quote_accept_channel || '').trim(),
-                        String(neg?.quote_channel || '').trim(),
-                        String(neg?.rfq_channel || '').trim(),
-                        String(neg?.swap_invite_channel || '').trim(),
-                      ].filter((ch) => ch && ch.length > 0)
-                    )
+                  const replayChannel =
+                    String(neg?.quote_accept_channel || '').trim() ||
+                    String(neg?.quote_channel || '').trim() ||
+                    String(neg?.rfq_channel || '').trim() ||
+                    String(neg?.swap_invite_channel || '').trim() ||
+                    swapChannel;
+                  await this._runToolWithTimeout(
+                    { tool: 'intercomswap_sc_send_json', args: { channel: replayChannel, json: quoteAcceptEnv } },
+                    { timeoutMs: Math.min(this._toolTimeoutMs, 10_000), label: 'tradeauto_waiting_terms_replay_accept' }
                   );
-                  for (const replayChannel of replayChannels) {
-                    try {
-                      await this._runToolWithTimeout(
-                        { tool: 'intercomswap_sc_send_json', args: { channel: replayChannel, json: quoteAcceptEnv } },
-                        { timeoutMs: Math.min(this._toolTimeoutMs, 10_000), label: 'tradeauto_waiting_terms_replay_accept' }
-                      );
-                      pingOk += 1;
-                    } catch (err) {
-                      pingErrors.push(`${replayChannel}: ${err?.message || String(err)}`);
-                    }
-                  }
+                  pingOk += 1;
                   this._trace('waiting_terms_replay_accept_ok', {
                     trade_id: tradeId,
                     channel: swapChannel,
                     attempt: Number(state.pings || 0) + 1,
-                    replay_channels: replayChannels,
+                    replay_channel: replayChannel,
                     sent_ok: pingOk,
                   });
                 }

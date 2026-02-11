@@ -369,7 +369,10 @@ test('tradeauto: taker waiting_terms replays quote_accept and then accepts terms
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
-    assert.ok(replayCalls.some((c) => c?.args?.channel === swapChannel), 'expected quote_accept replay while waiting terms');
+    assert.ok(
+      replayCalls.some((c) => String(c?.args?.json?.kind || '') === 'swap.quote_accept'),
+      'expected quote_accept replay while waiting terms'
+    );
     assert.equal(accepted.length, 1);
     assert.equal(String(accepted[0]?.args?.channel || ''), swapChannel);
   } finally {
