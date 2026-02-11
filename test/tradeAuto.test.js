@@ -200,6 +200,144 @@ test('tradeauto: offer-sourced quote path remains active (service announce -> qu
   }
 });
 
+test('tradeauto: RFQ auto-quote can run without offer match when enabled', async () => {
+  const tradeId = 'swap_test_rfq_auto_1';
+  const now = Date.now();
+  const posted = [];
+  const events = [
+    {
+      seq: 1,
+      ts: now,
+      channel: '0000intercomswapbtcusdt',
+      kind: 'swap.rfq',
+      message: env('swap.rfq', tradeId, TAKER, {
+        pair: 'BTC_LN/USDT_SOL',
+        direction: 'BTC_LN->USDT_SOL',
+        btc_sats: 12000,
+        usdt_amount: '1200000',
+        max_platform_fee_bps: 50,
+        max_trade_fee_bps: 50,
+        max_total_fee_bps: 100,
+        min_sol_refund_window_sec: 259200,
+        max_sol_refund_window_sec: 604800,
+        valid_until_unix: Math.floor((now + 120_000) / 1000),
+      }),
+    },
+  ];
+
+  let readCount = 0;
+  const mgr = new TradeAutoManager({
+    scLogInfo: () => ({ latest_seq: 1 }),
+    scLogRead: () => {
+      readCount += 1;
+      if (readCount > 1) return { latest_seq: 1, events: [] };
+      return { latest_seq: 1, events };
+    },
+    runTool: async ({ tool, args }) => {
+      if (tool === 'intercomswap_sc_subscribe') return { type: 'subscribed' };
+      if (tool === 'intercomswap_sc_info') return { peer: MAKER };
+      if (tool === 'intercomswap_sol_signer_pubkey') return { pubkey: SOL_RECIPIENT };
+      if (tool === 'intercomswap_sc_stats') return { channels: [] };
+      if (tool === 'intercomswap_quote_post_from_rfq') {
+        posted.push({ tool, args });
+        return { type: 'quote_posted' };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    },
+  });
+
+  try {
+    await mgr.start({
+      channels: ['0000intercomswapbtcusdt'],
+      usdt_mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+      enable_quote_from_offers: false,
+      enable_quote_from_rfqs: true,
+      enable_accept_quotes: false,
+      enable_invite_from_accepts: false,
+      enable_join_invites: false,
+      enable_settlement: false,
+    });
+    assert.equal(posted.length, 1);
+    assert.equal(String(posted[0]?.args?.channel || ''), '0000intercomswapbtcusdt');
+    assert.equal(String(posted[0]?.args?.rfq_envelope?.trade_id || ''), tradeId);
+  } finally {
+    await mgr.stop({ reason: 'test_done' });
+  }
+});
+
+test('tradeauto: aggregate liquidity mode is honored for RFQ auto-accept', async () => {
+  const tradeId = 'swap_test_accept_aggregate_1';
+  const now = Date.now();
+  const accepted = [];
+  const events = [
+    {
+      seq: 1,
+      ts: now,
+      channel: '0000intercomswapbtcusdt',
+      kind: 'swap.rfq',
+      local: true,
+      dir: 'out',
+      origin: 'local',
+      message: env('swap.rfq', tradeId, TAKER, {
+        pair: 'BTC_LN/USDT_SOL',
+        direction: 'BTC_LN->USDT_SOL',
+        btc_sats: 10000,
+        usdt_amount: '1000000',
+        valid_until_unix: Math.floor((now + 120_000) / 1000),
+      }),
+    },
+    {
+      seq: 2,
+      ts: now + 1,
+      channel: '0000intercomswapbtcusdt',
+      kind: 'swap.quote',
+      message: env('swap.quote', tradeId, MAKER, {
+        rfq_id: '1'.repeat(64),
+        btc_sats: 10000,
+        usdt_amount: '1000000',
+      }),
+    },
+  ];
+
+  let readOnce = false;
+  const mgr = new TradeAutoManager({
+    scLogInfo: () => ({ latest_seq: 2 }),
+    scLogRead: () => {
+      if (readOnce) return { latest_seq: 2, events: [] };
+      readOnce = true;
+      return { latest_seq: 2, events };
+    },
+    runTool: async ({ tool, args }) => {
+      if (tool === 'intercomswap_sc_subscribe') return { type: 'subscribed' };
+      if (tool === 'intercomswap_sc_info') return { peer: TAKER };
+      if (tool === 'intercomswap_sol_signer_pubkey') return { pubkey: SOL_RECIPIENT };
+      if (tool === 'intercomswap_sc_stats') return { channels: [] };
+      if (tool === 'intercomswap_quote_accept') {
+        accepted.push({ tool, args });
+        return { type: 'quote_accept_posted' };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    },
+  });
+
+  try {
+    await mgr.start({
+      channels: ['0000intercomswapbtcusdt'],
+      usdt_mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+      ln_liquidity_mode: 'aggregate',
+      enable_quote_from_offers: false,
+      enable_accept_quotes: true,
+      enable_invite_from_accepts: false,
+      enable_join_invites: false,
+      enable_settlement: false,
+    });
+    assert.equal(accepted.length, 1);
+    assert.equal(String(accepted[0]?.args?.ln_liquidity_mode || ''), 'aggregate');
+  } finally {
+    await mgr.stop({ reason: 'test_done' });
+  }
+});
+
 test('tradeauto: backend auto-leaves stale swap channels (expired invite)', async () => {
   const tradeId = 'swap_test_2';
   const left = [];

@@ -34,6 +34,23 @@ function envelopeSig(evt) {
   return /^[0-9a-f]{128}$/i.test(s) ? s : '';
 }
 
+function eventDedupKey(evt) {
+  if (!evt || typeof evt !== 'object') return '';
+  const seq = typeof evt?.seq === 'number' && Number.isFinite(evt.seq) ? Math.trunc(evt.seq) : 0;
+  if (seq > 0) return `seq:${seq}`;
+  const channel = String(evt?.channel || '').trim();
+  const kind = envelopeKind(evt);
+  const tradeId = envelopeTradeId(evt);
+  const sig = envelopeSig(evt);
+  if (sig) {
+    const signer = envelopeSigner(evt);
+    return `sig:${channel}:${kind}:${tradeId}:${signer}:${sig}`;
+  }
+  if (!channel && !kind && !tradeId) return '';
+  const ts = typeof evt?.ts === 'number' && Number.isFinite(evt.ts) ? Math.trunc(evt.ts) : 0;
+  return `evt:${channel}:${kind}:${tradeId}:${ts}`;
+}
+
 function eventTs(evt) {
   const ts = typeof evt?.ts === 'number' ? evt.ts : 0;
   return Number.isFinite(ts) && ts > 0 ? ts : Date.now();
@@ -200,6 +217,7 @@ export class TradeAutoManager {
     this._notOwnerTraceAt = new Map(); // trade_id -> ts
     this._termsReplayByTrade = new Map(); // trade_id -> { count, nextAtMs, lastTs }
     this._swapAutoLeaveByTrade = new Map(); // trade_id -> { attempts, nextAtMs, lastTs }
+    this._eventSeenAt = new Map(); // dedupe key -> seen_at_ms
     this._cachedLocalPeer = '';
     this._cachedLocalSolSigner = '';
     this._waitingTermsState = new Map(); // trade_id -> { firstSeenAt,lastTs,lastTraceAt,lastPingAt,nextPingAt,pings,timedOutAt }
@@ -272,6 +290,7 @@ export class TradeAutoManager {
         not_owner_trace_at: this._notOwnerTraceAt.size,
         terms_replay_by_trade: this._termsReplayByTrade.size,
         swap_auto_leave_by_trade: this._swapAutoLeaveByTrade.size,
+        event_seen: this._eventSeenAt.size,
         waiting_terms_state: this._waitingTermsState.size,
         debug_events: this._debugEvents.length,
       },
@@ -428,6 +447,7 @@ export class TradeAutoManager {
       ln_liquidity_mode: lnLiquidityMode,
       usdt_mint: usdtMint || null,
       enable_quote_from_offers: opts.enable_quote_from_offers !== false,
+      enable_quote_from_rfqs: opts.enable_quote_from_rfqs === true,
       enable_accept_quotes: opts.enable_accept_quotes !== false,
       enable_invite_from_accepts: opts.enable_invite_from_accepts !== false,
       enable_join_invites: opts.enable_join_invites !== false,
@@ -464,6 +484,7 @@ export class TradeAutoManager {
     this._notOwnerTraceAt.clear();
     this._termsReplayByTrade.clear();
     this._swapAutoLeaveByTrade.clear();
+    this._eventSeenAt.clear();
     this._cachedLocalPeer = '';
     this._cachedLocalSolSigner = '';
     this._waitingTermsState.clear();
@@ -492,6 +513,7 @@ export class TradeAutoManager {
       waiting_terms_max_wait_ms: waitingTermsMaxWaitMs,
       waiting_terms_leave_on_timeout: waitingTermsLeaveOnTimeout,
       trace_enabled: traceEnabled,
+      enable_quote_from_rfqs: opts.enable_quote_from_rfqs === true,
     });
 
     await this._runToolWithTimeout(
@@ -533,6 +555,7 @@ export class TradeAutoManager {
     this._notOwnerTraceAt.clear();
     this._termsReplayByTrade.clear();
     this._swapAutoLeaveByTrade.clear();
+    this._eventSeenAt.clear();
     this._cachedLocalPeer = '';
     this._cachedLocalSolSigner = '';
     this._waitingTermsState.clear();
@@ -670,11 +693,25 @@ export class TradeAutoManager {
       if (!tradeId || !Number.isFinite(lastTs) || now - lastTs > this._doneMaxAgeMs) this._waitingTermsState.delete(tradeId);
     }
     pruneMapByLimit(this._waitingTermsState, Math.max(this.opts?.max_trades || 120, this._preimageMax));
+
+    for (const [k, seenAt] of Array.from(this._eventSeenAt.entries())) {
+      if (!k || !Number.isFinite(seenAt) || now - Number(seenAt) > this._doneMaxAgeMs) this._eventSeenAt.delete(k);
+    }
+    pruneMapByLimit(this._eventSeenAt, Math.max(this._dedupeMax * 4, this._eventsMax * 2));
   }
 
   _appendEvents(events) {
     if (!Array.isArray(events) || events.length < 1) return;
-    for (const e of events) this._events.push(e);
+    const now = Date.now();
+    for (const e of events) {
+      const key = eventDedupKey(e);
+      if (key) {
+        const seenAt = Number(this._eventSeenAt.get(key) || 0);
+        if (seenAt > 0 && now - seenAt <= this._doneMaxAgeMs) continue;
+        this._eventSeenAt.set(key, now);
+      }
+      this._events.push(e);
+    }
     if (this._events.length > this._eventsMax) {
       this._events.splice(0, this._events.length - this._eventsMax);
     }
@@ -1025,7 +1062,7 @@ export class TradeAutoManager {
 
       let actionsLeft = 12;
 
-      if (this.opts.enable_quote_from_offers && actionsLeft > 0) {
+      if ((this.opts.enable_quote_from_offers || this.opts.enable_quote_from_rfqs) && actionsLeft > 0) {
         const rfqQueue = [...activeEvents]
           .filter((e) => envelopeKind(e) === 'swap.rfq')
           .reverse();
@@ -1036,7 +1073,11 @@ export class TradeAutoManager {
           if (!sig || this._autoQuotedRfqSig.has(sig)) continue;
           if (!this._canRunEvent('quote_from_offer', sig)) continue;
           const match = matchOfferForRfq({ rfqEvt, myOfferEvents: ctx.myOfferEvents });
-          if (!match) continue;
+          if (!match && this.opts.enable_quote_from_rfqs !== true) continue;
+          const refundWindowSec =
+            match && Number.isFinite(Number(match.solRefundWindowSec))
+              ? Number(match.solRefundWindowSec)
+              : Number(this.opts.default_sol_refund_window_sec || 72 * 3600);
           try {
             const ch = String(rfqEvt?.channel || '').trim();
             if (!ch) continue;
@@ -1046,11 +1087,16 @@ export class TradeAutoManager {
                 channel: ch,
                 rfq_envelope: rfqEvt.message,
                 trade_fee_collector: localSolSigner,
-                sol_refund_window_sec: match.solRefundWindowSec,
+                sol_refund_window_sec: refundWindowSec,
                 valid_for_sec: 180,
               },
             });
-            this._trace('auto_quote_ok', { trade_id: envelopeTradeId(rfqEvt), channel: ch, sig: sig.slice(0, 16) });
+            this._trace('auto_quote_ok', {
+              trade_id: envelopeTradeId(rfqEvt),
+              channel: ch,
+              sig: sig.slice(0, 16),
+              source: match ? 'offer_match' : 'rfq_auto',
+            });
             this._autoQuotedRfqSig.add(sig);
             this._clearEventRetry('quote_from_offer', sig);
             this._pruneCaches();

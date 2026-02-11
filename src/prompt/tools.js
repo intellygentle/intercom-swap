@@ -559,6 +559,7 @@ export const INTERCOMSWAP_TOOLS = [
       ln_liquidity_mode: { type: 'string', enum: ['single_channel', 'aggregate'] },
       usdt_mint: base58Param,
       enable_quote_from_offers: { type: 'boolean' },
+      enable_quote_from_rfqs: { type: 'boolean', description: 'Quote actionable RFQs even when no local offer line matched.' },
       enable_accept_quotes: { type: 'boolean' },
       enable_invite_from_accepts: { type: 'boolean' },
       enable_join_invites: { type: 'boolean' },

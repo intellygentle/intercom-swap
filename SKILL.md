@@ -449,6 +449,10 @@ A→Z operating flow:
 2. Start stack (or peer-only if already running)
    - Preferred: `intercomswap_stack_start` with explicit `peer_name`, `peer_store`, `sc_port`, `sidechannels`, and bootstrap flags for your environment.
    - `intercomswap_stack_start` auto-starts backend trade automation by default. Verify with `intercomswap_tradeauto_status`.
+     - default backend automation profile includes:
+       - `ln_liquidity_mode=aggregate`
+       - `enable_quote_from_offers=true`
+       - `enable_quote_from_rfqs=true`
    - Trade worker trace is OFF by default (recommended for production). Enable only for debugging with `intercomswap_tradeauto_trace_set`.
    - Reconfigure automation explicitly (channels, liquidity mode, refund defaults, enable/disable stages) with `intercomswap_tradeauto_start`.
    - If already running, validate readiness with:
@@ -500,6 +504,9 @@ A→Z operating flow:
    - Manage repost jobs: `intercomswap_autopost_status`, `intercomswap_autopost_stop`.
 7. Negotiation and swap execution (deterministic)
    - Preferred (backend worker): keep `intercomswap_tradeauto_start` running and let it orchestrate quote/accept/invite/join + settlement stages.
+   - For full maker+taker automation across both offer and RFQ routes, keep both quote-source flags enabled:
+     - `enable_quote_from_offers=true`
+     - `enable_quote_from_rfqs=true`
    - For stalled swaps in `waiting_terms`, tune worker `waiting_terms_*` options (bounded retry + timeout leave) instead of adding client-side loops.
    - Manual fallback (same deterministic tools):
      - `intercomswap_quote_post_from_rfq`

@@ -1338,6 +1338,7 @@ export class ToolExecutor {
         'ln_liquidity_mode',
         'usdt_mint',
         'enable_quote_from_offers',
+        'enable_quote_from_rfqs',
         'enable_accept_quotes',
         'enable_invite_from_accepts',
         'enable_join_invites',
@@ -1385,6 +1386,7 @@ export class ToolExecutor {
       }
       const usdtMint = expectOptionalString(args, toolName, 'usdt_mint', { min: 32, max: 64, pattern: /^[1-9A-HJ-NP-Za-km-z]+$/ });
       const enableQuote = 'enable_quote_from_offers' in args ? expectBool(args, toolName, 'enable_quote_from_offers') : undefined;
+      const enableQuoteFromRfqs = 'enable_quote_from_rfqs' in args ? expectBool(args, toolName, 'enable_quote_from_rfqs') : undefined;
       const enableAccept = 'enable_accept_quotes' in args ? expectBool(args, toolName, 'enable_accept_quotes') : undefined;
       const enableInvite = 'enable_invite_from_accepts' in args ? expectBool(args, toolName, 'enable_invite_from_accepts') : undefined;
       const enableJoin = 'enable_join_invites' in args ? expectBool(args, toolName, 'enable_join_invites') : undefined;
@@ -1417,6 +1419,7 @@ export class ToolExecutor {
         ...(lnLiquidityMode ? { ln_liquidity_mode: lnLiquidityMode } : {}),
         ...(usdtMint ? { usdt_mint: usdtMint } : {}),
         ...(enableQuote !== undefined ? { enable_quote_from_offers: enableQuote } : {}),
+        ...(enableQuoteFromRfqs !== undefined ? { enable_quote_from_rfqs: enableQuoteFromRfqs } : {}),
         ...(enableAccept !== undefined ? { enable_accept_quotes: enableAccept } : {}),
         ...(enableInvite !== undefined ? { enable_invite_from_accepts: enableInvite } : {}),
         ...(enableJoin !== undefined ? { enable_join_invites: enableJoin } : {}),
@@ -2032,6 +2035,7 @@ export class ToolExecutor {
           ln_liquidity_mode: 'aggregate',
           usdt_mint: String(this.solana?.usdtMint || '').trim(),
           enable_quote_from_offers: true,
+          enable_quote_from_rfqs: true,
           enable_accept_quotes: true,
           enable_invite_from_accepts: true,
           enable_join_invites: true,
