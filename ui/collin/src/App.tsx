@@ -222,7 +222,15 @@ function App() {
     } catch (_e) {}
     return gen;
   });
-  const [autoApprove, setAutoApprove] = useState(false);
+  const [autoApprove, setAutoApprove] = useState<boolean>(() => {
+    try {
+      const raw = String(window.localStorage.getItem('collin_auto_approve') || '').trim();
+      if (!raw) return true; // default ON on first run
+      return raw === '1';
+    } catch (_e) {
+      return true;
+    }
+  });
   const [runMode, setRunMode] = useState<'tool' | 'llm'>('tool');
 
   const [scConnected, setScConnected] = useState(false);
@@ -646,6 +654,13 @@ function App() {
       return true;
     }
   });
+  const [autoRfqFromOffers, setAutoRfqFromOffers] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_auto_rfq_from_offers') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
   const [autoInviteFromAccepts, setAutoInviteFromAccepts] = useState<boolean>(() => {
     try {
       return String(window.localStorage.getItem('collin_auto_invite_from_accepts') || '1') !== '0';
@@ -653,6 +668,11 @@ function App() {
       return true;
     }
   });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_auto_approve', autoApprove ? '1' : '0');
+    } catch (_e) {}
+  }, [autoApprove]);
   useEffect(() => {
     try {
       window.localStorage.setItem('collin_sell_usdt_inbox_open', sellUsdtInboxOpen ? '1' : '0');
@@ -688,9 +708,10 @@ function App() {
       window.localStorage.setItem('collin_auto_accept_quotes', autoAcceptQuotes ? '1' : '0');
       window.localStorage.setItem('collin_auto_join_swap_invites', autoJoinSwapInvites ? '1' : '0');
       window.localStorage.setItem('collin_auto_quote_from_offers', autoQuoteFromOffers ? '1' : '0');
+      window.localStorage.setItem('collin_auto_rfq_from_offers', autoRfqFromOffers ? '1' : '0');
       window.localStorage.setItem('collin_auto_invite_from_accepts', autoInviteFromAccepts ? '1' : '0');
     } catch (_e) {}
-  }, [autoAcceptQuotes, autoJoinSwapInvites, autoQuoteFromOffers, autoInviteFromAccepts]);
+  }, [autoAcceptQuotes, autoJoinSwapInvites, autoQuoteFromOffers, autoRfqFromOffers, autoInviteFromAccepts]);
 
   const [leaveChannel, setLeaveChannel] = useState<string>('');
   const [leaveBusy, setLeaveBusy] = useState(false);
@@ -1179,6 +1200,12 @@ function App() {
     return out;
   }, [scEvents, terminalReceiptTradeIdsSet]);
 
+  const watchedChannelsSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of scChannels.split(',').map((s) => s.trim()).filter(Boolean)) set.add(c);
+    return set;
+  }, [scChannels]);
+
  const inviteEvents = useMemo(() => {
     const now = uiNowMs;
     const out: any[] = [];
@@ -1190,7 +1217,7 @@ function App() {
         const tradeId = String(msg?.trade_id || (e as any)?.trade_id || '').trim();
         const done = Boolean(tradeId && terminalTradeIdsSet.has(tradeId));
         const swapCh = String(msg?.body?.swap_channel || '').trim();
-        const joined = Boolean(swapCh && joinedChannelsSet.has(swapCh));
+        const joined = Boolean(swapCh && (joinedChannelsSet.has(swapCh) || watchedChannelsSet.has(swapCh)));
         const expiresAtRaw = msg?.body?.invite?.payload?.expiresAt;
         const expiresAtMs = epochToMs(expiresAtRaw);
         const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
@@ -1208,7 +1235,7 @@ function App() {
       } catch (_e) {}
     }
     return out;
-  }, [scEvents, showExpiredInvites, dismissedInviteTradeIds, showDismissedInvites, uiNowMs, joinedChannelsSet, terminalTradeIdsSet]);
+  }, [scEvents, showExpiredInvites, dismissedInviteTradeIds, showDismissedInvites, uiNowMs, joinedChannelsSet, watchedChannelsSet, terminalTradeIdsSet]);
 
   const knownChannels = useMemo(() => {
     const set = new Set<string>();
@@ -1228,13 +1255,8 @@ function App() {
   }, [scEvents, scChannels, preflight?.sc_stats]);
   const knownChannelsForInputs = useMemo(() => knownChannels.slice(0, 500), [knownChannels]);
 
-  const watchedChannelsSet = useMemo(() => {
-    const set = new Set<string>();
-    for (const c of scChannels.split(',').map((s) => s.trim()).filter(Boolean)) set.add(c);
-    return set;
-  }, [scChannels]);
-
   const autoAcceptedQuoteSigRef = useRef<Set<string>>(new Set());
+  const autoRfqFromOfferLineRef = useRef<Set<string>>(new Set());
   const autoQuotedRfqSigRef = useRef<Set<string>>(new Set());
   const autoInvitedAcceptSigRef = useRef<Set<string>>(new Set());
   const autoJoinedInviteSigRef = useRef<Set<string>>(new Set());
@@ -1275,7 +1297,10 @@ function App() {
   useEffect(() => {
     if (!health?.ok) return;
     if (!joinedChannels || joinedChannels.length === 0) return;
-    const joinedSet = new Set(joinedChannels);
+    const joinedSet = new Set<string>(joinedChannels);
+    for (const ch of watchedChannelsSet) {
+      if (String(ch || '').startsWith('swap:')) joinedSet.add(ch);
+    }
     const now = uiNowMs;
 
     const candidates: Array<{ swapCh: string; tradeId: string; expiresAtMs: number }> = [];
@@ -1337,7 +1362,7 @@ function App() {
         if (autoDismissTradeRef.current.has(tradeId)) continue;
         const done = terminalTradeIdsSet.has(tradeId);
         const swapCh = String(msg?.body?.swap_channel || '').trim();
-        const joined = Boolean(swapCh && joinedChannelsSet.has(swapCh));
+        const joined = Boolean(swapCh && (joinedChannelsSet.has(swapCh) || watchedChannelsSet.has(swapCh)));
         const expiresAtMs = epochToMs(msg?.body?.invite?.payload?.expiresAt) || 0;
         const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
         if (!done && !expired && !joined) continue;
@@ -1348,7 +1373,190 @@ function App() {
     if (toDismiss.length === 0) return;
     for (const tid of toDismiss.slice(0, 20)) dismissInviteTrade(tid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [health?.ok, scEvents, uiNowMs, dismissedInviteTradeIds, terminalTradeIdsSet, joinedChannelsSet]);
+  }, [health?.ok, scEvents, uiNowMs, dismissedInviteTradeIds, terminalTradeIdsSet, joinedChannelsSet, watchedChannelsSet]);
+
+  useEffect(() => {
+    if (!health?.ok || !autoRfqFromOffers) return;
+    const solRecipient = String((preflight as any)?.sol_signer?.pubkey || '').trim();
+    if (!solRecipient) return;
+
+    const appHash = String((preflight as any)?.app?.app_hash || '').trim().toLowerCase();
+    const programId = String((preflight as any)?.app?.solana_program_id || '').trim();
+    const lamportsRaw = (preflight as any)?.sol_balance;
+    const lamportsAvailable =
+      typeof lamportsRaw === 'number'
+        ? lamportsRaw
+        : typeof lamportsRaw === 'string' && /^[0-9]+$/.test(lamportsRaw.trim())
+          ? Number.parseInt(lamportsRaw.trim(), 10)
+          : typeof (solBalance as any)?.lamports === 'number'
+            ? Number((solBalance as any).lamports)
+            : null;
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    let cancelled = false;
+    void (async () => {
+      const queue = [...offerEvents].reverse();
+      for (const offerEvt of queue) {
+        if (cancelled) return;
+        try {
+          const msg = (offerEvt as any)?.message;
+          const body = msg?.body && typeof msg.body === 'object' ? msg.body : null;
+          if (!body) continue;
+          const channel = String((offerEvt as any)?.channel || '').trim();
+          if (!channel) continue;
+
+          const offerSigner = String(msg?.signer || '').trim().toLowerCase();
+          const offerTradeId = String(msg?.trade_id || '').trim();
+          const envAppHash = String(body?.app_hash || '').trim().toLowerCase();
+          const envProgramId = String(body?.solana_program_id || '').trim();
+          if (appHash && envAppHash && envAppHash !== appHash) continue;
+          if (programId && envProgramId && envProgramId !== programId) continue;
+
+          const offerUntil = toIntOrNull(body?.valid_until_unix);
+          if (offerUntil !== null && offerUntil <= nowSec + 5) continue;
+
+          const rfqChannels = Array.isArray(body?.rfq_channels)
+            ? body.rfq_channels.map((c: any) => String(c || '').trim()).filter(Boolean)
+            : [];
+          const rfqChannel = rfqChannels.includes(channel) ? channel : rfqChannels[0] || channel;
+
+          const offers = Array.isArray(body?.offers) ? body.offers : [];
+          for (let i = 0; i < offers.length; i += 1) {
+            if (cancelled) return;
+            const line = offers[i] && typeof offers[i] === 'object' ? offers[i] : null;
+            if (!line) continue;
+
+            const have = String((line as any).have || '').trim().toUpperCase();
+            const want = String((line as any).want || '').trim().toUpperCase();
+            if (!(have === 'USDT_SOL' && want === 'BTC_LN')) continue;
+
+            const lineAppHash = String((line as any).app_hash || envAppHash || '').trim().toLowerCase();
+            const lineProgramId = String((line as any).solana_program_id || envProgramId || '').trim();
+            if (appHash && lineAppHash && lineAppHash !== appHash) continue;
+            if (programId && lineProgramId && lineProgramId !== programId) continue;
+
+            const btcSats = toIntOrNull((line as any).btc_sats);
+            const usdtAmount = String((line as any).usdt_amount || '').trim();
+            if (btcSats === null || btcSats < 1 || !/^[0-9]+$/.test(usdtAmount)) continue;
+
+            const maxPlatform = Math.max(0, Math.min(500, toIntOrNull((line as any).max_platform_fee_bps) ?? 500));
+            const maxTrade = Math.max(0, Math.min(1000, toIntOrNull((line as any).max_trade_fee_bps) ?? 1000));
+            const maxTotal = Math.max(0, Math.min(1500, toIntOrNull((line as any).max_total_fee_bps) ?? 1500));
+            if (maxPlatform + maxTrade > maxTotal) continue;
+
+            const minWin = Math.max(3600, Math.min(7 * 24 * 3600, toIntOrNull((line as any).min_sol_refund_window_sec) ?? 72 * 3600));
+            const maxWin = Math.max(3600, Math.min(7 * 24 * 3600, toIntOrNull((line as any).max_sol_refund_window_sec) ?? 7 * 24 * 3600));
+            if (minWin > maxWin) continue;
+
+            const dedupeKey = [
+              offerSigner,
+              offerTradeId,
+              rfqChannel,
+              String(i),
+              String(btcSats),
+              usdtAmount,
+              String(maxPlatform),
+              String(maxTrade),
+              String(maxTotal),
+              String(minWin),
+              String(maxWin),
+            ].join('|');
+            if (autoRfqFromOfferLineRef.current.has(dedupeKey)) continue;
+
+            const hasOpenLocalMatch = myRfqPosts.some((r) => {
+              try {
+                const rMsg = (r as any)?.message;
+                const rBody = rMsg?.body && typeof rMsg.body === 'object' ? rMsg.body : {};
+                const rChannel = String((r as any)?.channel || '').trim();
+                const rUntil = toIntOrNull(rBody?.valid_until_unix);
+                if (rUntil !== null && rUntil <= nowSec + 5) return false;
+                if (rChannel && rChannel !== rfqChannel) return false;
+                if (toIntOrNull(rBody?.btc_sats) !== btcSats) return false;
+                if (String(rBody?.usdt_amount || '').trim() !== usdtAmount) return false;
+                if (Math.max(0, Math.min(500, toIntOrNull(rBody?.max_platform_fee_bps) ?? 500)) !== maxPlatform) return false;
+                if (Math.max(0, Math.min(1000, toIntOrNull(rBody?.max_trade_fee_bps) ?? 1000)) !== maxTrade) return false;
+                if (Math.max(0, Math.min(1500, toIntOrNull(rBody?.max_total_fee_bps) ?? 1500)) !== maxTotal) return false;
+                if (
+                  Math.max(3600, Math.min(7 * 24 * 3600, toIntOrNull(rBody?.min_sol_refund_window_sec) ?? 72 * 3600)) !==
+                  minWin
+                )
+                  return false;
+                if (
+                  Math.max(3600, Math.min(7 * 24 * 3600, toIntOrNull(rBody?.max_sol_refund_window_sec) ?? 7 * 24 * 3600)) !==
+                  maxWin
+                )
+                  return false;
+                return true;
+              } catch (_e) {
+                return false;
+              }
+            });
+            if (hasOpenLocalMatch) {
+              autoRfqFromOfferLineRef.current.add(dedupeKey);
+              continue;
+            }
+
+            if (!ensureLnLiquidityForLines({ role: 'send', lines: [{ btc_sats: btcSats }], actionLabel: 'Auto-RFQ from offer' })) {
+              continue;
+            }
+            if (!Number.isFinite(lamportsAvailable as any) || Number(lamportsAvailable) < SOL_TX_FEE_BUFFER_LAMPORTS) {
+              continue;
+            }
+
+            const autoUntilUpper = offerUntil !== null && offerUntil > nowSec + 60 ? offerUntil : nowSec + 15 * 60;
+            const validUntil = Math.max(nowSec + 60, Math.min(autoUntilUpper, nowSec + 15 * 60));
+            const tradeId = `rfq-auto-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+
+            autoRfqFromOfferLineRef.current.add(dedupeKey);
+            try {
+              const out = await runToolFinal(
+                'intercomswap_rfq_post',
+                {
+                  channel: rfqChannel,
+                  trade_id: tradeId,
+                  btc_sats: btcSats,
+                  usdt_amount: usdtAmount,
+                  sol_recipient: solRecipient,
+                  max_platform_fee_bps: maxPlatform,
+                  max_trade_fee_bps: maxTrade,
+                  max_total_fee_bps: maxTotal,
+                  min_sol_refund_window_sec: minWin,
+                  max_sol_refund_window_sec: maxWin,
+                  valid_until_unix: validUntil,
+                  ln_liquidity_mode: lnLiquidityMode,
+                },
+                { auto_approve: true }
+              );
+              const cj = out?.content_json;
+              if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'error') {
+                throw new Error(String((cj as any).error || 'rfq_post failed'));
+              }
+              const rfqId = String((cj as any)?.rfq_id || '').trim();
+              pushToast('success', `Auto-posted RFQ from offer${rfqId ? ` (${rfqId.slice(0, 12)}…)` : ''}`);
+            } catch (err: any) {
+              autoRfqFromOfferLineRef.current.delete(dedupeKey);
+              pushToast('error', `Auto-RFQ failed: ${err?.message || String(err)}`);
+            }
+          }
+        } catch (_e) {}
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    health?.ok,
+    autoRfqFromOffers,
+    preflight?.app?.app_hash,
+    preflight?.app?.solana_program_id,
+    preflight?.sol_signer?.pubkey,
+    preflight?.sol_balance,
+    offerEvents,
+    myRfqPosts,
+    lnLiquidityMode,
+    solBalance,
+  ]);
 
   useEffect(() => {
     if (!health?.ok || !autoQuoteFromOffers) return;
@@ -7222,6 +7430,16 @@ function App() {
 	                <label className="check small">
 	                  <input
 	                    type="checkbox"
+	                    checked={autoRfqFromOffers}
+	                    onChange={(e) => setAutoRfqFromOffers(Boolean(e.target.checked))}
+	                  />
+	                  auto-post RFQs for matching offers (offer inbox)
+	                </label>
+	              </div>
+	              <div className="row">
+	                <label className="check small">
+	                  <input
+	                    type="checkbox"
 	                    checked={autoQuoteFromOffers}
 	                    onChange={(e) => setAutoQuoteFromOffers(Boolean(e.target.checked))}
 	                  />
@@ -7259,7 +7477,7 @@ function App() {
 	                </label>
 	              </div>
 	              <div className="muted small">
-	                Default flow is automatic. You can still accept quotes manually from Sell BTC ▸ Quote Inbox.
+	                Default flow is automatic for both directions. You can still trigger manual actions from Sell USDT / Sell BTC.
 	              </div>
 	            </div>
 	            <div className="field">
