@@ -39,6 +39,16 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
 const composeFile = path.join(repoRoot, 'dev/ln-regtest/docker-compose.yml');
 
+function intFromEnv(name, fallback) {
+  const raw = String(process.env[name] || '').trim();
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const LN_FUNDING_TRIES = intFromEnv('E2E_LN_FUNDING_TRIES', 80);
+const LN_FUNDING_DELAY_MS = intFromEnv('E2E_LN_FUNDING_DELAY_MS', 500);
+
 async function sh(cmd, args, opts = {}) {
   const { stdout, stderr } = await execFileP(cmd, args, {
     cwd: repoRoot,
@@ -293,12 +303,12 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
     const funds = await clnCli('cln-alice', ['listfunds']);
     if (!hasConfirmedUtxo(funds)) throw new Error('alice not funded (no confirmed UTXO yet)');
     return funds;
-  }, { label: 'alice funded' });
+  }, { label: 'alice funded', tries: LN_FUNDING_TRIES, delayMs: LN_FUNDING_DELAY_MS });
   await retry(async () => {
     const funds = await clnCli('cln-bob', ['listfunds']);
     if (!hasConfirmedUtxo(funds)) throw new Error('bob not funded (no confirmed UTXO yet)');
     return funds;
-  }, { label: 'bob funded' });
+  }, { label: 'bob funded', tries: LN_FUNDING_TRIES, delayMs: LN_FUNDING_DELAY_MS });
 
   // Connect and open channel (bob -> alice).
   const aliceInfo = await clnCli('cln-alice', ['getinfo']);

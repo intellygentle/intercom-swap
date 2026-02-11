@@ -1234,6 +1234,15 @@ Prereqs:
   - Tools: `intercomswap_sol_local_start`, `intercomswap_sol_local_status`, `intercomswap_sol_local_stop`
   - These start a local `solana-test-validator` on `127.0.0.1:8899` and load the escrow program `.so` (ledger/logs under `onchain/`, gitignored).
 
+E2E failure classification policy (mandatory):
+- Do not immediately treat every e2e failure as logic regression.
+- First classify failures as either:
+  - **flaky/timing-sensitive** (startup races, funding visibility lag, discovery lag), or
+  - **deterministic** (reproducible logic/env bug).
+- If a failure is flaky, it is acceptable to tune test waits/timeouts in a bounded way to get past infrastructure timing and re-verify behavior.
+- If a failure remains after increased waits, treat it as deterministic and debug/fix the root cause.
+- Always document in your report whether each failure was flaky or deterministic, and what timeout knobs (if any) were changed.
+
 Run:
 ```bash
 npm test
@@ -1249,6 +1258,21 @@ What `npm run test:e2e` does:
   - `bob`: client/LN payer + escrow claimer (has an invite).
   - `eve`: uninvited peer that joins the swap topic; must receive **zero** swap messages (confidentiality regression test).
 - Runs the RFQ maker/taker bots (`scripts/rfq-maker.mjs`, `scripts/rfq-taker.mjs`) in `--run-swap 1` mode to execute the full swap inside the invite-only swap channel.
+
+E2E flakiness guidance (timing vs determinism):
+- Some e2e steps are timing-sensitive on shared/slow machines, especially CLN wallet funding visibility after mining.
+- Known symptom:
+  - `alice funded failed after ... tries: alice not funded (no confirmed UTXO yet)`
+  - this can be a readiness lag (wallet index delay), not swap logic failure.
+- Triage approach:
+  1) rerun the failing test in isolation first;
+  2) if failure is still timing-related, increase only the funding wait window;
+  3) if it still fails after extended waits, treat it as deterministic failure and debug logic/environment.
+- Timeout knobs for `test-e2e/ln_solana_swap.test.js`:
+  - `E2E_LN_FUNDING_TRIES` (default `80`)
+  - `E2E_LN_FUNDING_DELAY_MS` (default `500`)
+  - Example:
+    - `E2E_LN_FUNDING_TRIES=140 E2E_LN_FUNDING_DELAY_MS=500 node --test test-e2e/ln_solana_swap.test.js`
 
 ### Production Notes (Not Implemented Here Yet)
 - Lightning mainnet/testnet: run your own CLN/LND and connect via local RPC credentials stored under `onchain/`.
