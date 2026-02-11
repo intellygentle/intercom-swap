@@ -609,6 +609,14 @@ test('e2e: svc_announce re-broadcast reaches late joiners', async (t) => {
     const s = await listenerSc.stats();
     if (s.type !== 'stats' || s.sidechannelStarted !== true) throw new Error('listener sidechannel not started');
   }, { label: 'listener sidechannel started', tries: 200, delayMs: 250 });
+  // Ensure the late-joining peer has actually established at least one hyperswarm connection
+  // before we assert that rebroadcasted announcements are observable. This avoids rare flakes
+  // where discovery/connect takes longer than the stream timeout even with a local DHT.
+  await retry(async () => {
+    const s = await listenerSc.stats();
+    const n = typeof s?.connectionCount === 'number' ? s.connectionCount : 0;
+    if (n < 1) throw new Error('listener has no sidechannel connections yet');
+  }, { label: 'listener sidechannel connected', tries: 240, delayMs: 250 });
 
   // Start a fake OpenAI-compatible LLM server to test LLM-mode prompting deterministically.
   const llm = await startFakeLlmServer({ toolName: 'intercomswap_sc_stats' });

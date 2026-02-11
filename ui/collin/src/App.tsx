@@ -678,7 +678,20 @@ function App() {
     return out;
   }, [promptEvents, scEvents, localPeerPubkeyHex]);
 
-  const inviteEvents = useMemo(() => {
+  const joinedChannels = useMemo(() => {
+    try {
+      const chans = Array.isArray(preflight?.sc_stats?.channels) ? (preflight.sc_stats.channels as any[]) : [];
+      const out = chans.map((c) => String(c || '').trim()).filter(Boolean);
+      out.sort();
+      return out;
+    } catch (_e) {
+      return [];
+    }
+  }, [preflight?.sc_stats]);
+
+  const joinedChannelsSet = useMemo(() => new Set(joinedChannels), [joinedChannels]);
+
+ const inviteEvents = useMemo(() => {
     const now = uiNowMs;
     const out: any[] = [];
     const seen = new Set<string>();
@@ -688,6 +701,7 @@ function App() {
         const msg = (e as any)?.message;
         const tradeId = String(msg?.trade_id || (e as any)?.trade_id || '').trim();
         const swapCh = String(msg?.body?.swap_channel || '').trim();
+        const joined = Boolean(swapCh && joinedChannelsSet.has(swapCh));
         const expiresAtRaw = msg?.body?.invite?.payload?.expiresAt;
         const expiresAtMs = epochToMs(expiresAtRaw);
         const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
@@ -697,11 +711,11 @@ function App() {
         const key = `${tradeId || ''}|${swapCh || ''}|${String((e as any)?.from || '')}|${String((e as any)?.seq || '')}`;
         if (key && seen.has(key)) continue;
         if (key) seen.add(key);
-        out.push({ ...e, _invite_expires_at_ms: expiresAtMs, _invite_expired: expired });
+        out.push({ ...e, _invite_expires_at_ms: expiresAtMs, _invite_expired: expired, _invite_joined: joined });
       } catch (_e) {}
     }
     return out;
-  }, [scEvents, showExpiredInvites, dismissedInviteTradeIds, showDismissedInvites, uiNowMs]);
+  }, [scEvents, showExpiredInvites, dismissedInviteTradeIds, showDismissedInvites, uiNowMs, joinedChannelsSet]);
 
   const knownChannels = useMemo(() => {
     const set = new Set<string>();
@@ -719,17 +733,6 @@ function App() {
     } catch (_e) {}
     return Array.from(set).sort();
   }, [scEvents, scChannels, preflight?.sc_stats]);
-
-  const joinedChannels = useMemo(() => {
-    try {
-      const chans = Array.isArray(preflight?.sc_stats?.channels) ? (preflight.sc_stats.channels as any[]) : [];
-      const out = chans.map((c) => String(c || '').trim()).filter(Boolean);
-      out.sort();
-      return out;
-    } catch (_e) {
-      return [];
-    }
-  }, [preflight?.sc_stats]);
 
   const watchedChannelsSet = useMemo(() => {
     const set = new Set<string>();
@@ -4109,6 +4112,11 @@ function App() {
 	                    evt={e}
 	                    onSelect={() => setSelected({ type: 'invite', evt: e })}
 	                    onJoin={() => {
+                        const swapCh = String((e as any)?.message?.body?.swap_channel || '').trim();
+                        if (swapCh && joinedChannelsSet.has(swapCh)) {
+                          pushToast('success', `Already joined ${swapCh}`);
+                          return;
+                        }
                         try {
                           const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
                           if (tradeId) dismissInviteTrade(tradeId);
@@ -4121,7 +4129,6 @@ function App() {
 	                        try {
 	                          await runToolFinal('intercomswap_join_from_swap_invite', { swap_invite_envelope: e.message }, { auto_approve: true });
                             try {
-                              const swapCh = String((e as any)?.message?.body?.swap_channel || '').trim();
                               if (swapCh) watchChannel(swapCh);
                             } catch (_e) {}
 	                          pushToast('success', 'Joined swap channel');
@@ -4157,6 +4164,7 @@ function App() {
                             await runToolFinal('intercomswap_sc_leave', { channel: swapCh }, { auto_approve: true });
                             pushToast('success', `Left ${swapCh}`);
                             if (watchedChannelsSet.has(swapCh)) unwatchChannel(swapCh);
+                            void refreshPreflight();
                           } catch (err: any) {
                             pushToast('error', err?.message || String(err));
                             try {
@@ -4212,6 +4220,7 @@ function App() {
                           return false;
                         }
                       })()}
+                      joined={Boolean((e as any)?._invite_joined)}
 	                  />
 	                )}
 	              />
@@ -6610,6 +6619,7 @@ function InviteRow({
   onUndismiss,
   watched,
   dismissed,
+  joined,
 }: {
   evt: any;
   onSelect: () => void;
@@ -6621,6 +6631,7 @@ function InviteRow({
   onUndismiss: () => void;
   watched: boolean;
   dismissed: boolean;
+  joined: boolean;
 }) {
   const msg = evt?.message;
   const body = msg?.body;
@@ -6640,6 +6651,7 @@ function InviteRow({
         {swapChannel ? <span className="mono chip hi">{swapChannel}</span> : null}
         {expired ? <span className="mono chip warn">expired</span> : null}
         {watched ? <span className="mono chip">watched</span> : null}
+        {joined ? <span className="mono chip">joined</span> : null}
         {dismissed ? <span className="mono chip dim">dismissed</span> : null}
       </div>
       <div className="rowitem-mid">
@@ -6650,12 +6662,13 @@ function InviteRow({
       <div className="rowitem-bot">
         <button
           className="btn small primary"
+          disabled={joined}
           onClick={(e) => {
             e.stopPropagation();
             onJoin();
           }}
         >
-          Join
+          {joined ? 'Joined' : 'Join'}
         </button>
         {swapChannel ? (
           <button
