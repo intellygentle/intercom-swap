@@ -1372,6 +1372,82 @@ function App() {
     return 0;
   };
 
+  const listingEventTradeId = (evt: any): string => {
+    try {
+      return String(evt?.trade_id || evt?.message?.trade_id || '').trim();
+    } catch (_e) {
+      return '';
+    }
+  };
+
+  const listingEventTsMs = (evt: any): number => {
+    const cands = [evt?.ts, evt?.message?.ts, evt?.updated_at];
+    for (const c of cands) {
+      const ms = epochToMs(c);
+      if (ms && Number.isFinite(ms) && ms > 0) return ms;
+      if (typeof c === 'number' && Number.isFinite(c) && c > 0) return c;
+      if (typeof c === 'string' && /^[0-9]+$/.test(c.trim())) {
+        const n = Number.parseInt(c.trim(), 10);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+    }
+    return 0;
+  };
+
+  // Keep the most recent known terminal timestamp per trade id.
+  // Listings older than or equal to this cutoff are hidden from activity panels.
+  const terminalTradeCutoffMsById = useMemo(() => {
+    const out = new Map<string, number>();
+    const put = (tradeIdRaw: any, tsRaw: any) => {
+      const tradeId = String(tradeIdRaw || '').trim();
+      if (!tradeId) return;
+      const ms = epochToMs(tsRaw) || (typeof tsRaw === 'number' && Number.isFinite(tsRaw) ? tsRaw : 0);
+      const prev = Number(out.get(tradeId) || 0);
+      if (ms > prev) out.set(tradeId, ms);
+      else if (!out.has(tradeId)) out.set(tradeId, prev);
+    };
+    for (const t of trades) {
+      if (!isTerminalTradeState(t?.state)) continue;
+      put(t?.trade_id, t?.updated_at ?? t?.created_at);
+    }
+    for (const t of openClaims) {
+      if (!isTerminalTradeState(t?.state)) continue;
+      put(t?.trade_id, t?.updated_at ?? t?.created_at);
+    }
+    for (const t of openRefunds) {
+      if (!isTerminalTradeState(t?.state)) continue;
+      put(t?.trade_id, t?.updated_at ?? t?.created_at);
+    }
+    if (selected?.type === 'trade' && isTerminalTradeState(selected?.trade?.state)) {
+      put(selected?.trade?.trade_id, selected?.trade?.updated_at ?? selected?.trade?.created_at);
+    }
+    for (const e of scEvents) {
+      try {
+        const kind = String((e as any)?.kind || '').trim();
+        if (kind !== 'swap.sol_claimed' && kind !== 'swap.sol_refunded' && kind !== 'swap.cancel') continue;
+        const msg = (e as any)?.message;
+        const tradeId = String((e as any)?.trade_id || msg?.trade_id || '').trim();
+        if (!tradeId) continue;
+        put(tradeId, (e as any)?.ts ?? msg?.ts);
+      } catch (_e) {}
+    }
+    for (const tradeId of terminalTradeIdsSet) {
+      if (!out.has(tradeId)) out.set(tradeId, 0);
+    }
+    return out;
+  }, [terminalTradeIdsSet, trades, openClaims, openRefunds, selected, scEvents]);
+
+  const shouldHideTerminalListingEvent = (evt: any): boolean => {
+    const tradeId = listingEventTradeId(evt);
+    if (!tradeId) return false;
+    if (!terminalTradeIdsSet.has(tradeId)) return false;
+    const cutoffMs = Number(terminalTradeCutoffMsById.get(tradeId) || 0);
+    if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) return true;
+    const evtMs = listingEventTsMs(evt);
+    if (!Number.isFinite(evtMs) || evtMs <= 0) return true;
+    return evtMs <= cutoffMs;
+  };
+
   useEffect(() => {
     if (terminalTradeIdsSet.size < 1) return;
     setOpenRefunds((prev) => prev.filter((t) => !terminalTradeIdsSet.has(String(t?.trade_id || '').trim())));
@@ -1849,49 +1925,54 @@ function App() {
   }
 
   const sellUsdtFeedItems = useMemo(() => {
+    const visibleRfqEvents = rfqEvents.filter((e) => !shouldHideTerminalListingEvent(e));
+    const visibleMyOfferPosts = myOfferPosts.filter((e) => !shouldHideTerminalListingEvent(e));
     const out: any[] = [];
-    out.push({ _t: 'header', id: 'h:inboxrfqs', title: 'BTC Sales', count: rfqEvents.length, open: sellUsdtInboxOpen, onToggle: () => toggleSellUsdtSection('inbox') });
+    out.push({ _t: 'header', id: 'h:inboxrfqs', title: 'BTC Sales', count: visibleRfqEvents.length, open: sellUsdtInboxOpen, onToggle: () => toggleSellUsdtSection('inbox') });
     if (sellUsdtInboxOpen) {
-      for (let i = 0; i < rfqEvents.length; i += 1) {
-        const e = rfqEvents[i];
+      for (let i = 0; i < visibleRfqEvents.length; i += 1) {
+        const e = visibleRfqEvents[i];
         out.push({ _t: 'rfq', id: feedEventId('inrfq:', e, i), evt: e });
       }
     }
-    out.push({ _t: 'header', id: 'h:myoffers', title: 'My Offers', count: myOfferPosts.length, open: sellUsdtMyOpen, onToggle: () => toggleSellUsdtSection('mine') });
+    out.push({ _t: 'header', id: 'h:myoffers', title: 'My Offers', count: visibleMyOfferPosts.length, open: sellUsdtMyOpen, onToggle: () => toggleSellUsdtSection('mine') });
     if (sellUsdtMyOpen) {
-      for (let i = 0; i < myOfferPosts.length; i += 1) {
-        const e = myOfferPosts[i];
+      for (let i = 0; i < visibleMyOfferPosts.length; i += 1) {
+        const e = visibleMyOfferPosts[i];
         out.push({ _t: 'offer', id: feedEventId('myoffer:', e, i), evt: e, badge: 'outbox' });
       }
     }
     return out;
-  }, [myOfferPosts, rfqEvents, sellUsdtInboxOpen, sellUsdtMyOpen]);
+  }, [myOfferPosts, rfqEvents, sellUsdtInboxOpen, sellUsdtMyOpen, terminalTradeIdsSet, terminalTradeCutoffMsById]);
 
   const sellBtcFeedItems = useMemo(() => {
+    const visibleOfferEvents = offerEvents.filter((e) => !shouldHideTerminalListingEvent(e));
+    const visibleQuoteEvents = quoteEvents.filter((e) => !shouldHideTerminalListingEvent(e));
+    const visibleMyRfqPosts = myRfqPosts.filter((e) => !shouldHideTerminalListingEvent(e));
     const out: any[] = [];
-    out.push({ _t: 'header', id: 'h:inboxoffers', title: 'USDT Sales', count: offerEvents.length, open: sellBtcInboxOpen, onToggle: () => toggleSellBtcSection('offers') });
+    out.push({ _t: 'header', id: 'h:inboxoffers', title: 'USDT Sales', count: visibleOfferEvents.length, open: sellBtcInboxOpen, onToggle: () => toggleSellBtcSection('offers') });
     if (sellBtcInboxOpen) {
-      for (let i = 0; i < offerEvents.length; i += 1) {
-        const e = offerEvents[i];
+      for (let i = 0; i < visibleOfferEvents.length; i += 1) {
+        const e = visibleOfferEvents[i];
         out.push({ _t: 'offer', id: feedEventId('inoffer:', e, i), evt: e });
       }
     }
-    out.push({ _t: 'header', id: 'h:inboxquotes', title: 'Exact Matches', count: quoteEvents.length, open: sellBtcQuotesOpen, onToggle: () => toggleSellBtcSection('quotes') });
+    out.push({ _t: 'header', id: 'h:inboxquotes', title: 'Exact Matches', count: visibleQuoteEvents.length, open: sellBtcQuotesOpen, onToggle: () => toggleSellBtcSection('quotes') });
     if (sellBtcQuotesOpen) {
-      for (let i = 0; i < quoteEvents.length; i += 1) {
-        const e = quoteEvents[i];
+      for (let i = 0; i < visibleQuoteEvents.length; i += 1) {
+        const e = visibleQuoteEvents[i];
         out.push({ _t: 'quote', id: feedEventId('inq:', e, i), evt: e });
       }
     }
-    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My Offers', count: myRfqPosts.length, open: sellBtcMyOpen, onToggle: () => toggleSellBtcSection('mine') });
+    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My Offers', count: visibleMyRfqPosts.length, open: sellBtcMyOpen, onToggle: () => toggleSellBtcSection('mine') });
     if (sellBtcMyOpen) {
-      for (let i = 0; i < myRfqPosts.length; i += 1) {
-        const e = myRfqPosts[i];
+      for (let i = 0; i < visibleMyRfqPosts.length; i += 1) {
+        const e = visibleMyRfqPosts[i];
         out.push({ _t: 'rfq', id: feedEventId('myrfq:', e, i), evt: e, badge: 'outbox' });
       }
     }
     return out;
-  }, [offerEvents, quoteEvents, myRfqPosts, sellBtcInboxOpen, sellBtcQuotesOpen, sellBtcMyOpen]);
+  }, [offerEvents, quoteEvents, myRfqPosts, sellBtcInboxOpen, sellBtcQuotesOpen, sellBtcMyOpen, terminalTradeIdsSet, terminalTradeCutoffMsById]);
 
   function oldestDbId(list: any[]) {
     let min = Number.POSITIVE_INFINITY;
