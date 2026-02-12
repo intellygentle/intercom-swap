@@ -1315,3 +1315,182 @@ test('tradeauto: waiting_terms replays latest quote_accept for reposted trade id
     await mgr.stop({ reason: 'test_done' });
   }
 });
+
+test('tradeauto: bounded stage retries cancel+leave on ln_route_precheck exhaustion', async () => {
+  const tradeId = 'swap_test_stage_retry_exhaust_precheck';
+  const swapChannel = `swap:${tradeId}`;
+  const now = Date.now();
+
+  const termsEnv = env('swap.terms', tradeId, MAKER, {
+    btc_sats: 1000,
+    usdt_amount: '670000',
+    sol_mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+    sol_recipient: SOL_RECIPIENT,
+    sol_refund: '2JfWqV6nS6f7QjE9pP2WfW2z1CYKo7U2uC8hYq7pW6sM',
+    sol_refund_after_unix: Math.floor((now + 72 * 3600 * 1000) / 1000),
+    ln_receiver_peer: MAKER,
+    ln_payer_peer: TAKER,
+    trade_fee_collector: SOL_RECIPIENT,
+  });
+  const invoiceEnv = env('swap.ln_invoice', tradeId, MAKER, {
+    bolt11:
+      'lnbc10u1p5cemg5pp503h4ceyly03nvgevmevjv4jrlrsr3s6tg89r8surn4lext8hpnfqdygwfn8zttjvecj6vfhxucrsdpnxymrydf4x5kkydnrxenrqwp595cnwdes8q6rxdp3xgcrvvfqf9h8getjvdhk6grnwashqgrjvecj6vfhxucrsdpnxymrydf4x5kkydnrxenrqwp5cqzzsxqrrsssp5k8zm63dhvg36cjhs48ckxk2glm7lc5hk94ahjhuzpwqu68hscqlq9qxpqysgqdkwmv5hvuke35jept3g8fc46cqlupsn7juv2scmqr530u8ywdv3xxp6walt49s7tlzszjkqdwc8f4emwue5qqelqkfpxz725cxjjdcqpa8930v',
+    payment_hash_hex: '7c6f5c649f23e336232cde59265643f8e038c34b41ca33c3839d7f932cf70cd2',
+  });
+
+  const events = [
+    { seq: 1, ts: now + 1, channel: swapChannel, kind: 'swap.terms', message: termsEnv },
+    { seq: 2, ts: now + 2, channel: swapChannel, kind: 'swap.accept', message: env('swap.accept', tradeId, TAKER, {}) },
+    { seq: 3, ts: now + 3, channel: swapChannel, kind: 'swap.ln_invoice', message: invoiceEnv },
+  ];
+
+  let precheckCalls = 0;
+  const statusNotes = [];
+  const cancels = [];
+  const left = [];
+  const mgr = new TradeAutoManager({
+    scLogInfo: () => ({ latest_seq: 3 }),
+    scLogRead: () => ({ latest_seq: 3, events }),
+    runTool: async ({ tool, args }) => {
+      if (tool === 'intercomswap_sc_subscribe') return { type: 'subscribed' };
+      if (tool === 'intercomswap_sc_info') return { peer: TAKER };
+      if (tool === 'intercomswap_sol_signer_pubkey') return { pubkey: SOL_RECIPIENT };
+      if (tool === 'intercomswap_sc_stats') return { channels: [swapChannel] };
+      if (tool === 'intercomswap_swap_ln_route_precheck_from_terms_invoice') {
+        precheckCalls += 1;
+        throw new Error('intercomswap_swap_ln_route_precheck_from_terms_invoice: unroutable invoice precheck: queryroutes found no route to destination deadbeef');
+      }
+      if (tool === 'intercomswap_swap_status_post') {
+        statusNotes.push(String(args?.note || ''));
+        return { type: 'status_posted' };
+      }
+      if (tool === 'intercomswap_swap_cancel_post') {
+        cancels.push({ tool, args });
+        return { type: 'cancel_posted' };
+      }
+      if (tool === 'intercomswap_sc_leave') {
+        left.push(String(args?.channel || ''));
+        return { type: 'left' };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    },
+  });
+
+  try {
+    await mgr.start({
+      channels: ['0000intercomswapbtcusdt'],
+      interval_ms: 20,
+      trace_enabled: true,
+      enable_quote_from_offers: false,
+      enable_quote_from_rfqs: false,
+      enable_accept_quotes: false,
+      enable_invite_from_accepts: false,
+      enable_join_invites: false,
+      enable_settlement: true,
+      ln_route_precheck_retry_cooldown_ms: 20,
+      stage_retry_max: 2,
+    });
+
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && cancels.length < 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    assert.equal(precheckCalls, 3, 'expected 1 initial attempt + 2 retries before abort');
+    assert.ok(statusNotes.some((n) => String(n || '').startsWith('ln_route_precheck_fail')), 'expected status note failures');
+    assert.equal(cancels.length, 1, 'expected a single cancel post');
+    assert.ok(left.includes(swapChannel), 'expected swap channel leave after abort');
+  } finally {
+    await mgr.stop({ reason: 'test_done' });
+  }
+});
+
+test('tradeauto: maker aborts immediately when payer reports ln_route_precheck_fail', async () => {
+  const tradeId = 'swap_test_precheck_gate_fail_abort';
+  const swapChannel = `swap:${tradeId}`;
+  const now = Date.now();
+
+  const termsEnv = env('swap.terms', tradeId, MAKER, {
+    btc_sats: 1000,
+    usdt_amount: '670000',
+    sol_mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+    sol_recipient: SOL_RECIPIENT,
+    sol_refund: '2JfWqV6nS6f7QjE9pP2WfW2z1CYKo7U2uC8hYq7pW6sM',
+    sol_refund_after_unix: Math.floor((now + 72 * 3600 * 1000) / 1000),
+    ln_receiver_peer: MAKER,
+    ln_payer_peer: TAKER,
+    trade_fee_collector: SOL_RECIPIENT,
+  });
+  const invoiceEnv = env('swap.ln_invoice', tradeId, MAKER, {
+    bolt11:
+      'lnbc10u1p5cemg5pp503h4ceyly03nvgevmevjv4jrlrsr3s6tg89r8surn4lext8hpnfqdygwfn8zttjvecj6vfhxucrsdpnxymrydf4x5kkydnrxenrqwp595cnwdes8q6rxdp3xgcrvvfqf9h8getjvdhk6grnwashqgrjvecj6vfhxucrsdpnxymrydf4x5kkydnrxenrqwp5cqzzsxqrrsssp5k8zm63dhvg36cjhs48ckxk2glm7lc5hk94ahjhuzpwqu68hscqlq9qxpqysgqdkwmv5hvuke35jept3g8fc46cqlupsn7juv2scmqr530u8ywdv3xxp6walt49s7tlzszjkqdwc8f4emwue5qqelqkfpxz725cxjjdcqpa8930v',
+    payment_hash_hex: '7c6f5c649f23e336232cde59265643f8e038c34b41ca33c3839d7f932cf70cd2',
+  });
+
+  const events = [
+    { seq: 1, ts: now + 1, channel: swapChannel, kind: 'swap.terms', message: termsEnv },
+    { seq: 2, ts: now + 2, channel: swapChannel, kind: 'swap.accept', message: env('swap.accept', tradeId, TAKER, {}) },
+    { seq: 3, ts: now + 3, channel: swapChannel, kind: 'swap.ln_invoice', message: invoiceEnv },
+    {
+      seq: 4,
+      ts: now + 4,
+      channel: swapChannel,
+      kind: 'swap.status',
+      message: env('swap.status', tradeId, TAKER, {
+        state: 'accepted',
+        note: 'ln_route_precheck_fail reason=queryroutes found no route',
+      }),
+    },
+  ];
+
+  const cancels = [];
+  const left = [];
+  const mgr = new TradeAutoManager({
+    scLogInfo: () => ({ latest_seq: 4 }),
+    scLogRead: () => ({ latest_seq: 4, events }),
+    runTool: async ({ tool, args }) => {
+      if (tool === 'intercomswap_sc_subscribe') return { type: 'subscribed' };
+      if (tool === 'intercomswap_sc_info') return { peer: MAKER };
+      if (tool === 'intercomswap_sol_signer_pubkey') return { pubkey: '2JfWqV6nS6f7QjE9pP2WfW2z1CYKo7U2uC8hYq7pW6sM' };
+      if (tool === 'intercomswap_sc_stats') return { channels: [swapChannel] };
+      if (tool === 'intercomswap_swap_sol_escrow_init_and_post') {
+        throw new Error('escrow should not be called when payer precheck failed');
+      }
+      if (tool === 'intercomswap_swap_cancel_post') {
+        cancels.push({ tool, args });
+        return { type: 'cancel_posted' };
+      }
+      if (tool === 'intercomswap_sc_leave') {
+        left.push(String(args?.channel || ''));
+        return { type: 'left' };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    },
+  });
+
+  try {
+    await mgr.start({
+      channels: ['0000intercomswapbtcusdt'],
+      interval_ms: 30,
+      trace_enabled: true,
+      enable_quote_from_offers: false,
+      enable_quote_from_rfqs: false,
+      enable_accept_quotes: false,
+      enable_invite_from_accepts: false,
+      enable_join_invites: false,
+      enable_settlement: true,
+      stage_retry_max: 2,
+      ln_route_precheck_wait_cooldown_ms: 30,
+    });
+
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && cancels.length < 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    assert.equal(cancels.length, 1, 'expected cancel when payer reported precheck fail');
+    assert.ok(left.includes(swapChannel), 'expected swap channel leave after abort');
+  } finally {
+    await mgr.stop({ reason: 'test_done' });
+  }
+});

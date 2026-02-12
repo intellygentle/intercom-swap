@@ -1867,6 +1867,7 @@ export class ToolExecutor {
         'ln_pay_fail_leave_attempts',
         'ln_pay_fail_leave_min_wait_ms',
         'ln_pay_retry_cooldown_ms',
+        'stage_retry_max',
         'trace_enabled',
         'ln_liquidity_mode',
         'usdt_mint',
@@ -1914,6 +1915,7 @@ export class ToolExecutor {
       const lnPayFailLeaveAttempts = expectOptionalInt(args, toolName, 'ln_pay_fail_leave_attempts', { min: 2, max: 50 });
       const lnPayFailLeaveMinWaitMs = expectOptionalInt(args, toolName, 'ln_pay_fail_leave_min_wait_ms', { min: 1_000, max: 60 * 60 * 1000 });
       const lnPayRetryCooldownMs = expectOptionalInt(args, toolName, 'ln_pay_retry_cooldown_ms', { min: 250, max: 120_000 });
+      const stageRetryMax = expectOptionalInt(args, toolName, 'stage_retry_max', { min: 0, max: 50 });
       const traceEnabled = 'trace_enabled' in args ? expectBool(args, toolName, 'trace_enabled') : undefined;
       const lnLiquidityModeRaw = expectOptionalString(args, toolName, 'ln_liquidity_mode', { min: 1, max: 32 });
       const lnLiquidityMode = lnLiquidityModeRaw ? String(lnLiquidityModeRaw).trim().toLowerCase() : '';
@@ -1956,6 +1958,7 @@ export class ToolExecutor {
         ...(lnPayFailLeaveAttempts !== null ? { ln_pay_fail_leave_attempts: lnPayFailLeaveAttempts } : {}),
         ...(lnPayFailLeaveMinWaitMs !== null ? { ln_pay_fail_leave_min_wait_ms: lnPayFailLeaveMinWaitMs } : {}),
         ...(lnPayRetryCooldownMs !== null ? { ln_pay_retry_cooldown_ms: lnPayRetryCooldownMs } : {}),
+        ...(stageRetryMax !== null ? { stage_retry_max: stageRetryMax } : {}),
         ...(traceEnabled !== undefined ? { trace_enabled: traceEnabled } : {}),
         ...(lnLiquidityMode ? { ln_liquidity_mode: lnLiquidityMode } : {}),
         ...(effectiveUsdtMint ? { usdt_mint: effectiveUsdtMint } : {}),
@@ -4302,6 +4305,62 @@ export class ToolExecutor {
       const signed = signSwapEnvelope(unsigned, signing);
       await this._sendEnvelopeLogged(sc, channel, signed);
       return { type: 'status_posted', channel, trade_id: tradeId, state, envelope: signed };
+    }
+
+    if (toolName === 'intercomswap_swap_cancel_post') {
+      assertAllowedKeys(args, toolName, ['channel', 'trade_id', 'reason']);
+      requireApproval(toolName, autoApprove);
+      const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
+      const tradeId = expectString(args, toolName, 'trade_id', { min: 1, max: 128, pattern: /^[A-Za-z0-9_.:-]+$/ });
+      const reason = expectOptionalString(args, toolName, 'reason', { min: 1, max: 500 });
+      if (dryRun) return { type: 'dry_run', tool: toolName, channel, trade_id: tradeId, ...(reason ? { reason } : {}) };
+
+      // Safety: CANCEL is only allowed before escrow is created. Enforce this here,
+      // because TradeAuto treats cancel as terminal regardless of swap state.
+      const scan = this._scanScLogListingState({ tradeId });
+      if (scan.has_escrow || scan.has_ln_paid) {
+        throw new Error(`${toolName}: CANCEL not allowed after escrow creation`);
+      }
+
+      const store = await this._openReceiptsStore({ required: false });
+      try {
+        if (store) {
+          const tr = store.getTrade(tradeId);
+          const st = normalizeTradeState(tr?.state);
+          if (st === 'escrow' || st === 'ln_paid' || st === 'claimed' || st === 'refunded') {
+            throw new Error(`${toolName}: CANCEL not allowed after escrow creation (receipts.state=${st})`);
+          }
+        }
+
+        const unsigned = createUnsignedEnvelope({
+          v: 1,
+          kind: KIND.CANCEL,
+          tradeId,
+          body: { ...(reason ? { reason } : {}) },
+        });
+
+        const signing = await this._requirePeerSigning();
+        const sc = await this._scEnsureChannelSubscribed(channel, { timeoutMs: 10_000 });
+        const signed = signSwapEnvelope(unsigned, signing);
+        await this._sendEnvelopeLogged(sc, channel, signed);
+
+        try {
+          if (store) {
+            store.upsertTrade(tradeId, {
+              swap_channel: channel,
+              state: 'canceled',
+              last_error: null,
+            });
+            store.appendEvent(tradeId, 'swap_cancel', { channel, reason: reason || null });
+          }
+        } catch (_e) {}
+
+        return { type: 'cancel_posted', channel, trade_id: tradeId, envelope: signed };
+      } finally {
+        try {
+          store?.close?.();
+        } catch (_e) {}
+      }
     }
 
     if (toolName === 'intercomswap_terms_accept_from_terms') {

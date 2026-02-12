@@ -554,6 +554,8 @@ A→Z operating flow:
      - `ln_pay_fail_leave_attempts`
      - `ln_pay_fail_leave_min_wait_ms`
      - `ln_pay_retry_cooldown_ms`
+   - For bounded stage retry storms (CPU guardrail), tune:
+     - `stage_retry_max` (default `2`): max per-stage retries before tradeauto aborts (posts CANCEL when safe + leaves swap channel).
 	   - Manual fallback (same deterministic tools):
 	     - `intercomswap_quote_post_from_rfq`
 	     - `intercomswap_quote_accept`
@@ -570,6 +572,7 @@ A→Z operating flow:
 8. Recovery and stuck-trade handling
    - Inspect local receipts: `intercomswap_receipts_list`, `intercomswap_receipts_show`
    - Find pending claims/refunds: `intercomswap_receipts_list_open_claims`, `intercomswap_receipts_list_open_refunds`
+   - Cancel pre-escrow swaps (stop automation + stop counterparty): `intercomswap_swap_cancel_post` (only allowed before escrow is created)
    - Execute recovery: `intercomswap_swaprecover_claim`, `intercomswap_swaprecover_refund`
 9. Channel and process hygiene
    - Leave stale sidechannels: `intercomswap_sc_leave` / `intercomswap_sc_leave_many`

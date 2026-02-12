@@ -558,6 +558,7 @@ export const INTERCOMSWAP_TOOLS = [
       ln_pay_fail_leave_attempts: { type: 'integer', minimum: 2, maximum: 50, description: 'Deterministic threshold: auto-leave swap channel only after this many ln_pay failures for same trade.' },
       ln_pay_fail_leave_min_wait_ms: { type: 'integer', minimum: 1000, maximum: 3600000, description: 'Deterministic threshold: auto-leave only after this much elapsed time since first ln_pay failure.' },
       ln_pay_retry_cooldown_ms: { type: 'integer', minimum: 250, maximum: 120000, description: 'Cooldown between ln_pay retries before thresholds are reached.' },
+      stage_retry_max: { type: 'integer', minimum: 0, maximum: 50, description: 'Max per-stage retries before tradeauto aborts (cancel+leave when safe). Default 2.' },
       trace_enabled: { type: 'boolean', description: 'Enable verbose in-worker trace events (disabled by default).' },
       ln_liquidity_mode: { type: 'string', enum: ['single_channel', 'aggregate'] },
       usdt_mint: base58Param,
@@ -741,6 +742,16 @@ export const INTERCOMSWAP_TOOLS = [
       note: { type: 'string', minLength: 1, maxLength: 500 },
     },
     required: ['channel', 'trade_id', 'state'],
+  }),
+  tool('intercomswap_swap_cancel_post', 'Post signed CANCEL envelope inside swap:<id> (only allowed before escrow is created).', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      channel: channelParam,
+      trade_id: { type: 'string', minLength: 1, maxLength: 128 },
+      reason: { type: 'string', minLength: 1, maxLength: 500, description: 'Optional human-readable cancel reason.' },
+    },
+    required: ['channel', 'trade_id'],
   }),
   tool(
     'intercomswap_terms_accept_from_terms',

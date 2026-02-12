@@ -310,6 +310,7 @@ export class TradeAutoManager {
     this._stageDone = new Map(); // stage_key -> done_at_ms
     this._stageInFlight = new Set();
     this._stageRetryAfter = new Map();
+    this._stageRetryCount = new Map(); // stage_key -> retries (bounded)
     this._tradePreimage = new Map();
     this._notOwnerTraceAt = new Map(); // trade_id -> ts
     this._termsReplayByTrade = new Map(); // trade_id -> { count, nextAtMs, lastTs }
@@ -319,6 +320,7 @@ export class TradeAutoManager {
     this._cachedLocalSolSigner = '';
     this._waitingTermsState = new Map(); // trade_id -> { firstSeenAt,lastTs,lastTraceAt,lastPingAt,nextPingAt,pings,timedOutAt }
     this._lnPayFailByTrade = new Map(); // trade_id -> { channel, failures, firstFailAt, lastFailAt, abortedAt, abortReason, lastAbortTraceAt }
+    this._abortedTrades = new Map(); // trade_id -> { at_ms, stage, channel, reason }
 
     this._stats = {
       ticks: 0,
@@ -384,6 +386,7 @@ export class TradeAutoManager {
         stage_done: this._stageDone.size,
         stage_in_flight: this._stageInFlight.size,
         stage_retry_after: this._stageRetryAfter.size,
+        stage_retry_count: this._stageRetryCount.size,
         trade_preimage: this._tradePreimage.size,
         not_owner_trace_at: this._notOwnerTraceAt.size,
         terms_replay_by_trade: this._termsReplayByTrade.size,
@@ -391,6 +394,7 @@ export class TradeAutoManager {
         event_seen: this._eventSeenAt.size,
         waiting_terms_state: this._waitingTermsState.size,
         ln_pay_fail_by_trade: this._lnPayFailByTrade.size,
+        aborted_trades: this._abortedTrades.size,
         debug_events: this._debugEvents.length,
       },
       recent_events: this._debugEvents.slice(-Math.min(200, this._debugMax)),
@@ -523,17 +527,22 @@ export class TradeAutoManager {
     const lnPayFailLeaveAttempts = clampInt(toIntOrNull(opts.ln_pay_fail_leave_attempts), {
       min: 2,
       max: 50,
-      fallback: 3,
+      fallback: 2,
     });
     const lnPayFailLeaveMinWaitMs = clampInt(toIntOrNull(opts.ln_pay_fail_leave_min_wait_ms), {
       min: 1_000,
       max: 60 * 60 * 1000,
-      fallback: 20_000,
+      fallback: 5_000,
     });
     const lnPayRetryCooldownMs = clampInt(toIntOrNull(opts.ln_pay_retry_cooldown_ms), {
       min: 250,
       max: 120_000,
       fallback: 10_000,
+    });
+    const stageRetryMax = clampInt(toIntOrNull(opts.stage_retry_max), {
+      min: 0,
+      max: 50,
+      fallback: 2,
     });
     const lnRoutePrecheckRetryCooldownMs = clampInt(toIntOrNull(opts.ln_route_precheck_retry_cooldown_ms), {
       min: 250,
@@ -580,6 +589,7 @@ export class TradeAutoManager {
       ln_pay_fail_leave_attempts: lnPayFailLeaveAttempts,
       ln_pay_fail_leave_min_wait_ms: lnPayFailLeaveMinWaitMs,
       ln_pay_retry_cooldown_ms: lnPayRetryCooldownMs,
+      stage_retry_max: stageRetryMax,
       ln_route_precheck_retry_cooldown_ms: lnRoutePrecheckRetryCooldownMs,
       ln_route_precheck_wait_cooldown_ms: lnRoutePrecheckWaitCooldownMs,
       trace_enabled: traceEnabled,
@@ -619,6 +629,7 @@ export class TradeAutoManager {
     this._stageDone.clear();
     this._stageInFlight.clear();
     this._stageRetryAfter.clear();
+    this._stageRetryCount.clear();
     this._tradePreimage.clear();
     this._notOwnerTraceAt.clear();
     this._termsReplayByTrade.clear();
@@ -628,6 +639,7 @@ export class TradeAutoManager {
     this._cachedLocalSolSigner = '';
     this._waitingTermsState.clear();
     this._lnPayFailByTrade.clear();
+    this._abortedTrades.clear();
 
     this._stats = {
       ticks: 0,
@@ -655,6 +667,7 @@ export class TradeAutoManager {
       ln_pay_fail_leave_attempts: lnPayFailLeaveAttempts,
       ln_pay_fail_leave_min_wait_ms: lnPayFailLeaveMinWaitMs,
       ln_pay_retry_cooldown_ms: lnPayRetryCooldownMs,
+      stage_retry_max: stageRetryMax,
       ln_route_precheck_retry_cooldown_ms: lnRoutePrecheckRetryCooldownMs,
       ln_route_precheck_wait_cooldown_ms: lnRoutePrecheckWaitCooldownMs,
       trace_enabled: traceEnabled,
@@ -696,6 +709,7 @@ export class TradeAutoManager {
     this._stageDone.clear();
     this._stageInFlight.clear();
     this._stageRetryAfter.clear();
+    this._stageRetryCount.clear();
     this._tradePreimage.clear();
     this._notOwnerTraceAt.clear();
     this._termsReplayByTrade.clear();
@@ -705,6 +719,7 @@ export class TradeAutoManager {
     this._cachedLocalSolSigner = '';
     this._waitingTermsState.clear();
     this._lnPayFailByTrade.clear();
+    this._abortedTrades.clear();
     this._traceEnabled = false;
     this._trace('tradeauto_stop', { reason: String(reason || 'stopped') });
     return { type: 'tradeauto_stopped', reason: String(reason || 'stopped'), ...this.status() };
@@ -727,8 +742,18 @@ export class TradeAutoManager {
     if (!stageKey) return;
     this._stageInFlight.delete(stageKey);
     this._stageRetryAfter.delete(stageKey);
+    this._stageRetryCount.delete(stageKey);
     this._stageDone.set(stageKey, Date.now());
     this._trace('stage_ok', { stage: String(stageKey) });
+  }
+
+  _markStageTerminal(stageKey, outcome) {
+    if (!stageKey) return;
+    this._stageInFlight.delete(stageKey);
+    this._stageRetryAfter.delete(stageKey);
+    this._stageRetryCount.delete(stageKey);
+    this._stageDone.set(stageKey, Date.now());
+    this._trace('stage_terminal', { stage: String(stageKey), outcome: String(outcome || 'terminal') });
   }
 
   _markStageRetry(stageKey, cooldownMs) {
@@ -737,6 +762,91 @@ export class TradeAutoManager {
     const ms = Math.max(250, Math.trunc(cooldownMs || 250));
     this._stageRetryAfter.set(stageKey, Date.now() + ms);
     this._trace('stage_retry', { stage: String(stageKey), cooldown_ms: ms });
+  }
+
+  _recordStageRetry(stageKey) {
+    const prev = Number(this._stageRetryCount.get(stageKey) || 0);
+    const next = Number.isFinite(prev) && prev >= 0 ? prev + 1 : 1;
+    this._stageRetryCount.set(stageKey, next);
+    return next;
+  }
+
+  async _abortTrade({ tradeId, channel, stage, reason, canCancel }) {
+    const id = String(tradeId || '').trim();
+    const ch = String(channel || '').trim();
+    if (!id || !ch) return;
+    if (this._abortedTrades.has(id)) return;
+    const row = {
+      at_ms: Date.now(),
+      stage: String(stage || '').trim() || null,
+      channel: ch,
+      reason: String(reason || '').trim().slice(0, 1000) || null,
+    };
+    this._abortedTrades.set(id, row);
+    this._trace('trade_abort', {
+      trade_id: id,
+      channel: ch,
+      stage: row.stage,
+      reason: row.reason,
+      cancel: Boolean(canCancel),
+    });
+
+    if (canCancel) {
+      try {
+        await this._runToolWithTimeout(
+          {
+            tool: 'intercomswap_swap_cancel_post',
+            args: { channel: ch, trade_id: id, reason: row.reason || 'canceled by tradeauto' },
+          },
+          { timeoutMs: Math.min(this._toolTimeoutMs, 12_000), label: 'tradeauto_cancel_post' }
+        );
+        this._trace('trade_abort_cancel_ok', { trade_id: id, channel: ch, stage: row.stage });
+      } catch (err) {
+        this._trace('trade_abort_cancel_fail', {
+          trade_id: id,
+          channel: ch,
+          stage: row.stage,
+          error: err?.message || String(err),
+        });
+      }
+    }
+
+    try {
+      await this._runToolWithTimeout(
+        { tool: 'intercomswap_sc_leave', args: { channel: ch } },
+        { timeoutMs: Math.min(this._toolTimeoutMs, 10_000), label: 'tradeauto_abort_leave' }
+      );
+      this._trace('trade_abort_leave_ok', { trade_id: id, channel: ch, stage: row.stage });
+    } catch (err) {
+      this._trace('trade_abort_leave_fail', { trade_id: id, channel: ch, stage: row.stage, error: err?.message || String(err) });
+    }
+  }
+
+  async _stageRetryOrAbort({ stageKey, tradeId, channel, stage, error, cooldownMs, canCancel }) {
+    const retries = this._recordStageRetry(stageKey);
+    const maxRetries = Number.isFinite(Number(this.opts?.stage_retry_max)) ? Number(this.opts.stage_retry_max) : 2;
+    if (retries <= maxRetries) {
+      this._markStageRetry(stageKey, cooldownMs);
+      return { aborted: false, retries, max_retries: maxRetries };
+    }
+
+    this._markStageTerminal(stageKey, 'retry_exhausted');
+    this._trace('stage_retry_exhausted', {
+      stage: String(stageKey),
+      trade_id: String(tradeId || '').trim() || null,
+      channel: String(channel || '').trim() || null,
+      retries,
+      max_retries: maxRetries,
+      error: String(error || '').trim().slice(0, 1000) || null,
+    });
+    await this._abortTrade({
+      tradeId,
+      channel,
+      stage: stage || stageKey,
+      reason: error,
+      canCancel: Boolean(canCancel),
+    });
+    return { aborted: true, retries, max_retries: maxRetries };
   }
 
   _recordLnPayFailure({ tradeId, channel, error, forceAbort = false }) {
@@ -813,6 +923,7 @@ export class TradeAutoManager {
     this._swapAutoLeaveByTrade.delete(tradeId);
     this._waitingTermsState.delete(tradeId);
     this._lnPayFailByTrade.delete(tradeId);
+    this._abortedTrades.delete(tradeId);
     const prefix = `${tradeId}:`;
     for (const key of Array.from(this._stageDone.keys())) {
       if (String(key).startsWith(prefix)) this._stageDone.delete(key);
@@ -822,6 +933,9 @@ export class TradeAutoManager {
     }
     for (const key of Array.from(this._stageRetryAfter.keys())) {
       if (String(key).startsWith(prefix)) this._stageRetryAfter.delete(key);
+    }
+    for (const key of Array.from(this._stageRetryCount.keys())) {
+      if (String(key).startsWith(prefix)) this._stageRetryCount.delete(key);
     }
   }
 
@@ -857,6 +971,15 @@ export class TradeAutoManager {
       if (now - Number(retryAfter) > this._doneMaxAgeMs) this._stageRetryAfter.delete(stageKey);
     }
 
+    for (const [stageKey, count] of Array.from(this._stageRetryCount.entries())) {
+      if (!Number.isFinite(Number(count)) || Number(count) < 0) {
+        this._stageRetryCount.delete(stageKey);
+        continue;
+      }
+      const doneAt = Number(this._stageDone.get(stageKey) || 0);
+      if (doneAt > 0 && now - doneAt > this._doneMaxAgeMs) this._stageRetryCount.delete(stageKey);
+    }
+
     pruneSetByLimit(this._autoQuotedRfqSig, this._dedupeMax);
     pruneSetByLimit(this._autoAcceptedQuoteSig, this._dedupeMax);
     pruneMapByLimit(this._autoAcceptedTradeLock, Math.max(this.opts?.max_trades || 120, this._preimageMax));
@@ -865,6 +988,7 @@ export class TradeAutoManager {
     pruneMapByLimit(this._stageDone, this._stageMax);
     pruneSetByLimit(this._stageInFlight, this._stageMax);
     pruneMapByLimit(this._stageRetryAfter, this._stageMax);
+    pruneMapByLimit(this._stageRetryCount, this._stageMax);
     pruneMapByLimit(this._tradePreimage, this._preimageMax);
     for (const [tradeId, ts] of Array.from(this._notOwnerTraceAt.entries())) {
       if (!Number.isFinite(ts) || now - Number(ts) > this._doneMaxAgeMs) this._notOwnerTraceAt.delete(tradeId);
@@ -890,6 +1014,12 @@ export class TradeAutoManager {
       if (!tradeId || !Number.isFinite(lastTs) || now - lastTs > this._doneMaxAgeMs) this._lnPayFailByTrade.delete(tradeId);
     }
     pruneMapByLimit(this._lnPayFailByTrade, Math.max(this.opts?.max_trades || 120, this._preimageMax));
+
+    for (const [tradeId, row] of Array.from(this._abortedTrades.entries())) {
+      const at = Number(row?.at_ms || 0);
+      if (!tradeId || !Number.isFinite(at) || now - at > this._doneMaxAgeMs) this._abortedTrades.delete(tradeId);
+    }
+    pruneMapByLimit(this._abortedTrades, Math.max(this.opts?.max_trades || 120, this._preimageMax));
 
     for (const [k, seenAt] of Array.from(this._eventSeenAt.entries())) {
       if (!k || !Number.isFinite(seenAt) || now - Number(seenAt) > this._doneMaxAgeMs) this._eventSeenAt.delete(k);
@@ -1619,6 +1749,7 @@ export class TradeAutoManager {
           const tradeId = String(tradeCtx?.trade_id || '').trim();
           if (!tradeId) continue;
           if (tradeCtx.claimed || tradeCtx.refunded || tradeCtx.canceled) continue;
+          if (this._abortedTrades.has(tradeId)) continue;
 
           const neg = ctx.swapNegotiationByTrade.get(tradeId) || {};
           const rfqEnv = isObject(neg?.rfq) ? neg.rfq : null;
@@ -1742,9 +1873,18 @@ export class TradeAutoManager {
                 actionsLeft -= 1;
                 this._stats.actions += 1;
               } catch (err) {
-                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: err?.message || String(err) });
-                this._markStageRetry(stageKey, 10_000);
-                this._log(`[tradeauto] ${stageKey} failed: ${err?.message || String(err)}`);
+                const errMsg = err?.message || String(err);
+                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: errMsg });
+                await this._stageRetryOrAbort({
+                  stageKey,
+                  tradeId,
+                  channel: swapChannel,
+                  stage: 'terms_post',
+                  error: errMsg,
+                  cooldownMs: 10_000,
+                  canCancel: true,
+                });
+                this._log(`[tradeauto] ${stageKey} failed: ${errMsg}`);
               }
             }
             continue;
@@ -1997,9 +2137,18 @@ export class TradeAutoManager {
                 actionsLeft -= 1;
                 this._stats.actions += 1;
               } catch (err) {
-                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: err?.message || String(err) });
-                this._markStageRetry(stageKey, 10_000);
-                this._log(`[tradeauto] ${stageKey} failed: ${err?.message || String(err)}`);
+                const errMsg = err?.message || String(err);
+                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: errMsg });
+                await this._stageRetryOrAbort({
+                  stageKey,
+                  tradeId,
+                  channel: swapChannel,
+                  stage: 'terms_accept',
+                  error: errMsg,
+                  cooldownMs: 10_000,
+                  canCancel: true,
+                });
+                this._log(`[tradeauto] ${stageKey} failed: ${errMsg}`);
               }
             }
             continue;
@@ -2026,9 +2175,18 @@ export class TradeAutoManager {
                 actionsLeft -= 1;
                 this._stats.actions += 1;
               } catch (err) {
-                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: err?.message || String(err) });
-                this._markStageRetry(stageKey, 10_000);
-                this._log(`[tradeauto] ${stageKey} failed: ${err?.message || String(err)}`);
+                const errMsg = err?.message || String(err);
+                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: errMsg });
+                await this._stageRetryOrAbort({
+                  stageKey,
+                  tradeId,
+                  channel: swapChannel,
+                  stage: 'ln_invoice',
+                  error: errMsg,
+                  cooldownMs: 10_000,
+                  canCancel: true,
+                });
+                this._log(`[tradeauto] ${stageKey} failed: ${errMsg}`);
               }
             }
             continue;
@@ -2102,7 +2260,15 @@ export class TradeAutoManager {
                   channel: swapChannel,
                   error: normalizeTraceText(errMsg, 500),
                 });
-                this._markStageRetry(stageKey, Math.max(250, Number(this.opts?.ln_route_precheck_retry_cooldown_ms || 10_000)));
+                await this._stageRetryOrAbort({
+                  stageKey,
+                  tradeId,
+                  channel: swapChannel,
+                  stage: 'ln_route_precheck',
+                  error: errMsg,
+                  cooldownMs: Math.max(250, Number(this.opts?.ln_route_precheck_retry_cooldown_ms || 10_000)),
+                  canCancel: true,
+                });
                 this._log(`[tradeauto] ${stageKey} failed: ${errMsg}`);
               }
             }
@@ -2115,15 +2281,36 @@ export class TradeAutoManager {
               const okTs = Number(routePrecheckStatus?.ok_ts || 0);
               const failTs = Number(routePrecheckStatus?.fail_ts || 0);
               if (okTs < 1 || failTs > okTs) {
+                const payerReportedFail = failTs > okTs;
+                const failNote = payerReportedFail ? normalizeTraceText(routePrecheckStatus?.fail_note || '', 320) : '';
                 this._trace('ln_route_precheck_gate_block', {
                   trade_id: tradeId,
                   channel: swapChannel,
-                  reason: failTs > okTs ? 'payer_reported_fail' : 'waiting_for_payer_precheck',
+                  reason: payerReportedFail ? 'payer_reported_fail' : 'waiting_for_payer_precheck',
                   precheck_ok_ts: okTs > 0 ? okTs : null,
                   precheck_fail_ts: failTs > 0 ? failTs : null,
-                  precheck_fail_note: failTs > okTs ? normalizeTraceText(routePrecheckStatus?.fail_note || '', 320) : null,
+                  precheck_fail_note: payerReportedFail ? failNote : null,
                 });
-                this._markStageRetry(stageKey, Math.max(250, Number(this.opts?.ln_route_precheck_wait_cooldown_ms || 4_000)));
+                if (payerReportedFail) {
+                  this._markStageTerminal(stageKey, 'precheck_fail');
+                  await this._abortTrade({
+                    tradeId,
+                    channel: swapChannel,
+                    stage: 'sol_escrow_gate',
+                    reason: failNote ? `ln_route_precheck_fail ${failNote}` : 'ln_route_precheck_fail',
+                    canCancel: true,
+                  });
+                  continue;
+                }
+                await this._stageRetryOrAbort({
+                  stageKey,
+                  tradeId,
+                  channel: swapChannel,
+                  stage: 'sol_escrow_gate',
+                  error: 'waiting_for_payer_precheck',
+                  cooldownMs: Math.max(250, Number(this.opts?.ln_route_precheck_wait_cooldown_ms || 4_000)),
+                  canCancel: true,
+                });
                 continue;
               }
               this._trace('ln_route_precheck_gate_pass', {
@@ -2170,9 +2357,18 @@ export class TradeAutoManager {
                 actionsLeft -= 1;
                 this._stats.actions += 1;
               } catch (err) {
-                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: err?.message || String(err) });
-                this._markStageRetry(stageKey, 10_000);
-                this._log(`[tradeauto] ${stageKey} failed: ${err?.message || String(err)}`);
+                const errMsg = err?.message || String(err);
+                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: errMsg });
+                await this._stageRetryOrAbort({
+                  stageKey,
+                  tradeId,
+                  channel: swapChannel,
+                  stage: 'sol_escrow',
+                  error: errMsg,
+                  cooldownMs: 10_000,
+                  canCancel: true,
+                });
+                this._log(`[tradeauto] ${stageKey} failed: ${errMsg}`);
               }
             }
             continue;
@@ -2299,9 +2495,18 @@ export class TradeAutoManager {
                 actionsLeft -= 1;
                 this._stats.actions += 1;
               } catch (err) {
-                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: err?.message || String(err) });
-                this._markStageRetry(stageKey, 15_000);
-                this._log(`[tradeauto] ${stageKey} failed: ${err?.message || String(err)}`);
+                const errMsg = err?.message || String(err);
+                this._trace('stage_fail', { stage: stageKey, trade_id: tradeId, error: errMsg });
+                await this._stageRetryOrAbort({
+                  stageKey,
+                  tradeId,
+                  channel: swapChannel,
+                  stage: 'sol_claim',
+                  error: errMsg,
+                  cooldownMs: 15_000,
+                  canCancel: false,
+                });
+                this._log(`[tradeauto] ${stageKey} failed: ${errMsg}`);
               }
             }
           }
