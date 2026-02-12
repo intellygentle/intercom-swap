@@ -691,6 +691,30 @@ async function runLnRoutePrecheck({
       `${toolName}: unroutable invoice precheck: destination ${destinationPubkey} has no route hints and this node has no direct active channel to destination`
     );
   }
+  // Conservative guardrail: with only one active channel and no hints/direct path,
+  // routed payments are frequently unroutable in practice even if a graph route exists.
+  // Prefer failing precheck early so maker does not lock USDT into escrow.
+  if (
+    lnImpl === 'lnd' &&
+    routingSummary &&
+    Number(routingSummary.channels_active || 0) < 2 &&
+    Number(routeHintCount || 0) < 1
+  ) {
+    // One-channel nodes frequently hit NO_ROUTE even when a graph route exists.
+    // However, a direct active channel to the destination with sufficient local balance
+    // is usually deterministic enough to allow.
+    const directCanPay =
+      directActiveChannel &&
+      requiredBtcSats !== null &&
+      requiredBtcSats > 0n &&
+      typeof directActiveChannel.local_sats === 'bigint' &&
+      directActiveChannel.local_sats >= requiredBtcSats;
+    if (!directCanPay) {
+      throw new Error(
+        `${toolName}: unroutable invoice precheck: payer has only one active channel and invoice has no route hints (high NO_ROUTE risk; need >=2 active channels or route hints/direct-sufficient channel)`
+      );
+    }
+  }
 
   return {
     ln_impl: lnImpl,
@@ -5633,6 +5657,8 @@ export class ToolExecutor {
           termsBody: isObject(terms?.body) ? terms.body : {},
           bolt11,
           toolName,
+          requireDecodedInvoice: true,
+          requireRoutingSnapshot: true,
         });
         const lnImpl = String(routePrecheck.ln_impl || '').trim().toLowerCase();
         const destinationPubkey = String(routePrecheck.destination_pubkey || '').trim().toLowerCase();

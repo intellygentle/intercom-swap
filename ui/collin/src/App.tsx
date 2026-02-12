@@ -4599,7 +4599,6 @@ function App() {
 	        <aside className="nav">
 	          <nav className="nav-inner">
 	            <NavButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} label="Overview" />
-	            <NavButton active={activeTab === 'prompt'} onClick={() => setActiveTab('prompt')} label="Prompt" />
 	            <NavButton
 	              active={activeTab === 'sell_usdt'}
 	              onClick={() => setActiveTab('sell_usdt')}
@@ -4622,6 +4621,7 @@ function App() {
 	            <NavButton active={activeTab === 'refunds'} onClick={() => setActiveTab('refunds')} label="Refunds" />
 	            <NavButton active={activeTab === 'wallets'} onClick={() => setActiveTab('wallets')} label="Wallets" />
 	            <NavButton active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} label="Settings" />
+	            <NavButton active={activeTab === 'prompt'} onClick={() => setActiveTab('prompt')} label="Prompt" />
 	            <NavButton active={activeTab === 'console'} onClick={() => setActiveTab('console')} label="Console" />
 	          </nav>
 	        </aside>
