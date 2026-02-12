@@ -6768,6 +6768,7 @@ function App() {
 	                    trade={t}
 	                    oracle={oracle}
 	                    terminalTradeIdsSet={terminalTradeIdsSet}
+	                    nowUnixSec={Math.floor(uiNowMs / 1000)}
 	                    selected={selected?.type === 'trade' && selected?.trade?.trade_id === t?.trade_id}
 	                    onSelect={() => setSelected({ type: 'trade', trade: t })}
 	                    onRecoverClaim={() => void recoverClaimForTrade(t)}
@@ -6917,6 +6918,7 @@ function App() {
 	                    trade={t}
 	                    oracle={oracle}
 	                    terminalTradeIdsSet={terminalTradeIdsSet}
+	                    nowUnixSec={Math.floor(uiNowMs / 1000)}
 	                    selected={selected?.type === 'trade' && selected?.trade?.trade_id === t?.trade_id}
 	                    onSelect={() => setSelected({ type: 'trade', trade: t })}
 	                    onRecoverClaim={() => void recoverClaimForTrade(t)}
@@ -6951,6 +6953,7 @@ function App() {
 	                    trade={t}
 	                    oracle={oracle}
 	                    terminalTradeIdsSet={terminalTradeIdsSet}
+	                    nowUnixSec={Math.floor(uiNowMs / 1000)}
 	                    selected={selected?.type === 'trade' && selected?.trade?.trade_id === t?.trade_id}
 	                    onSelect={() => setSelected({ type: 'trade', trade: t })}
 	                    onRecoverClaim={() => void recoverClaimForTrade(t)}
@@ -9922,6 +9925,7 @@ function TradeRow({
   trade,
   oracle,
   terminalTradeIdsSet,
+  nowUnixSec,
   selected,
   onSelect,
   onRecoverClaim,
@@ -9930,6 +9934,7 @@ function TradeRow({
   trade: any;
   oracle?: OracleSummary;
   terminalTradeIdsSet?: ReadonlySet<string>;
+  nowUnixSec?: number;
   selected: boolean;
   onSelect: () => void;
   onRecoverClaim: () => void;
@@ -9961,9 +9966,23 @@ function TradeRow({
   const terminal = terminalByState || Boolean(tradeId && terminalTradeIdsSet?.has(tradeId));
   const expired = terminal;
 
+  const refundAfterRaw = trade?.sol_refund_after_unix;
+  const refundAfterUnix =
+    typeof refundAfterRaw === 'number'
+      ? refundAfterRaw
+      : typeof refundAfterRaw === 'string' && /^[0-9]+$/.test(refundAfterRaw.trim())
+        ? Number.parseInt(refundAfterRaw.trim(), 10)
+        : null;
+  const nowSec = Number.isFinite(nowUnixSec as any) ? Number(nowUnixSec) : Math.floor(Date.now() / 1000);
+  const refundReached = refundAfterUnix !== null && Number.isFinite(refundAfterUnix) && nowSec >= refundAfterUnix;
+
   const canClaim = !terminal && stateLower === 'ln_paid' && Boolean(String(trade?.ln_preimage_hex || '').trim());
-  const canRefund =
-    !terminal && stateLower === 'escrow' && trade?.sol_refund_after_unix !== null && trade?.sol_refund_after_unix !== undefined;
+  const canRefund = !terminal && stateLower === 'escrow' && refundReached;
+  const refundTitle = canRefund
+    ? 'Refund now'
+    : refundAfterUnix && Number.isFinite(refundAfterUnix)
+      ? `Refund available after ${unixSecToUtcIso(refundAfterUnix)}`
+      : 'Not refundable yet';
 
   return (
     <div className={`rowitem ${selected ? 'selected' : ''} ${expired ? 'expired' : ''}`} role="button" onClick={onSelect}>
@@ -9989,14 +10008,14 @@ function TradeRow({
           >
             Claim
           </button>
-          <button
-            className={`btn small ${canRefund ? 'primary' : ''}`}
-            aria-disabled={!canRefund}
-            title={canRefund ? 'Refund now' : 'Not refundable yet'}
-            onClick={(e) => { e.stopPropagation(); onRecoverRefund(); }}
-          >
-            Refund
-          </button>
+	          <button
+	            className={`btn small ${canRefund ? 'primary' : ''}`}
+	            aria-disabled={!canRefund}
+	            title={refundTitle}
+	            onClick={(e) => { e.stopPropagation(); onRecoverRefund(); }}
+	          >
+	            Refund
+	          </button>
         </div>
       </div>
     </div>
