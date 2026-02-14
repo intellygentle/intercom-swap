@@ -140,3 +140,23 @@ test('repairToolArguments: coerces sol_transfer_sol lamports decimal (SOL units)
   });
   assert.equal(out.lamports, '10000000');
 });
+
+test('repairToolArguments: autopost_start rewrites amount-derived job names to Collin-style names', () => {
+  const out = repairToolArguments('intercomswap_autopost_start', {
+    name: 'offer_1000sats_0.12usdt',
+    tool: 'intercomswap_offer_post',
+    interval_sec: '10',
+    ttl_sec: '60',
+    args: {
+      channels: ['0000intercomswapbtcusdt'],
+      name: 'maker:alice',
+      offers: [{ btc_sats: 1000, usdt_amount: '120000' }],
+    },
+  });
+  assert.equal(out.interval_sec, 10);
+  assert.equal(out.ttl_sec, 60);
+  assert.ok(typeof out.name === 'string' && out.name.length > 0);
+  assert.ok(out.name.startsWith('offer_maker_alice_'), out.name);
+  assert.ok(!out.name.includes('sats'), out.name);
+  assert.ok(!out.name.includes('usdt'), out.name);
+});

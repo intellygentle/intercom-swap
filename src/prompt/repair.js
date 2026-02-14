@@ -30,6 +30,40 @@ function pow10BigInt(n) {
   return out;
 }
 
+function sanitizeToken(value, { maxLen = 64 } = {}) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  return s.replaceAll(/[^A-Za-z0-9._-]/g, '_').slice(0, maxLen);
+}
+
+function looksAmountDerivedJobName(value) {
+  // Heuristic to detect model-generated names like: offer_1000sats_0.12usdt
+  // We intentionally avoid flagging generic names like "offer_usdt_bot".
+  const s = String(value || '');
+  if (!s) return false;
+  return /(\d+)(?:_?)(sats?|sat)\b/i.test(s) || /(\d+(?:\.\d+)?)(?:_?)(usdt)\b/i.test(s);
+}
+
+function buildAutopostJobName({ tool, subArgs }) {
+  const t = String(tool || '').trim();
+  const sub = isObject(subArgs) ? subArgs : {};
+  const nowMs = Date.now();
+
+  if (t === 'intercomswap_offer_post') {
+    const label = typeof sub?.name === 'string' && sub.name.trim() ? sub.name.trim() : 'maker';
+    const safeLabel = sanitizeToken(label, { maxLen: 28 }) || 'maker';
+    return sanitizeToken(`offer_${safeLabel}_${nowMs}`, { maxLen: 64 }) || `offer_${nowMs}`;
+  }
+
+  if (t === 'intercomswap_rfq_post') {
+    const label = typeof sub?.trade_id === 'string' && sub.trade_id.trim() ? sub.trade_id.trim() : 'rfq';
+    const safeLabel = sanitizeToken(label, { maxLen: 30 }) || 'rfq';
+    return sanitizeToken(`rfq_${safeLabel}_${nowMs}`, { maxLen: 64 }) || `rfq_${nowMs}`;
+  }
+
+  return sanitizeToken(`job_${nowMs}`, { maxLen: 64 }) || `job_${nowMs}`;
+}
+
 function decimalToAtomicString(value, decimals) {
   // Deterministic conversion for prompt-mode robustness.
   // - If already an integer string: return it.
@@ -94,6 +128,21 @@ export function repairToolArguments(toolName, args) {
     if ('interval_sec' in out) out.interval_sec = coerceSafeInt(out.interval_sec);
     if ('ttl_sec' in out) out.ttl_sec = coerceSafeInt(out.ttl_sec);
     if ('valid_until_unix' in out) out.valid_until_unix = coerceSafeInt(out.valid_until_unix);
+
+    // Prompt-mode robustness: the LLM often invents deterministic, term-derived job names
+    // (e.g. offer_1000sats_0.12usdt) which collide on repeated prompts and are hostile to
+    // "chunking". If we detect such a name (or it is missing/invalid), generate a Collin-style
+    // name based on maker/trade_id + timestamp (no amounts in the name).
+    const nameRaw = typeof out.name === 'string' ? out.name.trim() : '';
+    const nameSafe = sanitizeToken(nameRaw, { maxLen: 64 });
+    const tool = typeof out.tool === 'string' ? out.tool.trim() : '';
+    const subArgs = isObject(out.args) ? out.args : {};
+    const shouldGenerate = !nameSafe || nameSafe !== nameRaw || looksAmountDerivedJobName(nameSafe);
+    if (shouldGenerate) {
+      out.name = buildAutopostJobName({ tool, subArgs });
+    } else {
+      out.name = nameSafe;
+    }
     return out;
   }
 
