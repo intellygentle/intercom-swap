@@ -15,6 +15,7 @@ import { Timer } from './features/timer/index.js';
 import Sidechannel from './features/sidechannel/index.js';
 import ScBridge from './features/sc-bridge/index.js';
 import PriceOracleFeature from './features/price/index.js';
+import { ResearchAgentHandler } from './features/research-agent/index.js';
 
 const { env, storeLabel, flags } = getPearRuntime();
 
@@ -681,11 +682,60 @@ const sidechannel = new Sidechannel(peer, {
   ownerKeys: sidechannelOwnerMap.size > 0 ? sidechannelOwnerMap : undefined,
   defaultOwnerKey: sidechannelDefaultOwner || undefined,
   welcomeByChannel: sidechannelWelcomeMap.size > 0 ? sidechannelWelcomeMap : undefined,
-  onMessage: scBridgeEnabled
-    ? (channel, payload, connection) => scBridge.handleSidechannelMessage(channel, payload, connection)
-    : sidechannelQuiet
-      ? () => {}
-      : null,
+onMessage: (channel, payload, connection) => {
+    // Quietly skip internal control messages (auth, welcome handshakes)
+    // so they never reach the research agent.
+    const control = payload?.message?.control;
+    if (control === 'auth' || control === 'welcome') {
+      if (scBridgeEnabled && scBridge) {
+        scBridge.handleSidechannelMessage(channel, payload, connection);
+      }
+      return;
+    }
+
+    // Print all incoming messages to stdout so every node (including the
+    // sender) sees responses as they arrive on any joined channel.
+    const remoteKey = connection?.remotePublicKey;
+    let senderShort = 'unknown';
+    if (remoteKey) {
+      senderShort = (typeof remoteKey.toString === 'function'
+        ? remoteKey.toString('hex')
+        : String(remoteKey)
+      ).substring(0, 16);
+    } else if (payload?.from) {
+      senderShort = String(payload.from).substring(0, 16);
+    }
+
+    // Extract the human-readable text from the payload for display.
+    const rawMsg = payload?.message;
+    let displayText = null;
+    if (rawMsg && typeof rawMsg === 'object' && rawMsg.text) {
+      displayText = String(rawMsg.text);
+    } else if (typeof rawMsg === 'string') {
+      displayText = rawMsg;
+    } else if (typeof payload === 'string') {
+      displayText = payload;
+    }
+
+    // Only print non-empty, non-protocol messages to avoid flooding the terminal.
+    if (displayText && !displayText.trim().startsWith('{')) {
+      console.log(`\n📩 [${channel}] from ${senderShort}...:`);
+      console.log(displayText);
+      console.log('');
+    }
+
+    // Research Agent handler — instantiated once and reused.
+    // Pass the sidechannel instance so the agent can call broadcast() to reply.
+    if (!peer.researchAgent) {
+      peer.researchAgent = new ResearchAgentHandler(sidechannel);
+    }
+    peer.researchAgent.handleMessage(channel, payload, connection);
+
+    // Also forward to SC-Bridge if enabled
+    if (scBridgeEnabled && scBridge) {
+      scBridge.handleSidechannelMessage(channel, payload, connection);
+    }
+  },
 });
 peer.sidechannel = sidechannel;
 
@@ -704,6 +754,11 @@ sidechannel
   .start()
   .then(() => {
     console.log('Sidechannel: ready');
+    if (!peer.researchAgent) {
+      peer.researchAgent = new ResearchAgentHandler(sidechannel);
+    }
+    // Announce after 6s to give peers time to connect.
+    peer.researchAgent.announce(sidechannelEntry, { delayMs: 6000 });
   })
   .catch((err) => {
     console.error('Sidechannel failed to start:', err?.message ?? err);
