@@ -69,7 +69,7 @@ Once the agent is running, any peer on the Trac network can interact with it.
 ### Install & Run
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/intercom-swap
+https://github.com/intellygentle/intercom-swap
 cd intercom-swap
 npm install
 pear run ~/intercom-swap
@@ -77,6 +77,11 @@ pear run ~/intercom-swap
 ## To confirm if others can use it while it is running on your pc
 
 ```
+cd intercom-swap
+
+https://github.com/user-attachments/assets/f3f72641-a097-4972-8a6d-c592fc97f907
+
+
 pear run . --peer-store-name my-node
 ```
 
@@ -259,6 +264,8 @@ General encyclopedic knowledge via Wikipedia
 **Announce-on-first-message fallback** — if no peers are connected when the scheduled 6-second announcement fires, `_announced` resets to `false` and the announcement is retried the moment the first real message arrives.
 
 ---
+
+video proof 
 
 ## 📄 License
 
